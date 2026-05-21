@@ -42,6 +42,19 @@ public sealed class PacketRouter
         }
     }
 
+    /// <summary>
+    /// Returns the currently-registered handler for <paramref name="header"/>,
+    /// or <c>null</c> if nothing is registered. Used by stage-owned handlers
+    /// that want to wrap (rather than replace) an existing registration.
+    /// </summary>
+    public IPacketHandler? GetHandler(OutHeader header)
+    {
+        lock (_lock)
+        {
+            return _handlers.TryGetValue((short)header, out var h) ? h : null;
+        }
+    }
+
     public void Dispatch(InPacket packet, ClientSession session)
     {
         var op = packet.ReadShort();

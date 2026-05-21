@@ -3,6 +3,7 @@ using MapleClaude.Debug;
 using MapleClaude.Map;
 using MapleClaude.Net;
 using MapleClaude.Net.Handlers;
+using MapleClaude.Net.Packet;
 using MapleClaude.Net.Senders;
 using MapleClaude.Render;
 using MapleClaude.UI;
@@ -354,13 +355,13 @@ public sealed class CharCreationStage : Stage
                     if (Game.Session.IsConnected)
                     {
                         // Validate name with server before advancing
-                        Game.Session.RegisterHandler(InHeader.CheckDuplicatedIDResult, pkt =>
+                        Game.Session.RegisterHandler(OutHeader.CheckDuplicatedIDResult, pkt =>
                         {
-                            pkt.DecodeString(); // echo name
-                            var code = pkt.DecodeInt();
+                            pkt.ReadString();       // echo name
+                            var code = pkt.ReadByte();
                             if (code == 0) _subScreen = SubScreen.Confirm;
                             else _nameError = code == 1 ? "Name already in use." : "Invalid name.";
-                            Game.Session.UnregisterHandler(InHeader.CheckDuplicatedIDResult);
+                            Game.Session.UnregisterHandler(OutHeader.CheckDuplicatedIDResult);
                         });
                         Game.Session.Send(LoginSender.CheckDuplicatedId(_nameField!.Text));
                     }

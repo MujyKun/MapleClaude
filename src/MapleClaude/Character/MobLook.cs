@@ -28,7 +28,6 @@ public sealed class MobLook
 
     // ── State ─────────────────────────────────────────────────────────────────
     public enum MobState { Stand, Move, Attack, Hit, Die }
-    private MobState _state = MobState.Stand;
     private bool     _facingLeft;
     private bool     _dead;
 

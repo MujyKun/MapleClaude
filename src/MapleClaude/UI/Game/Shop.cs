@@ -150,7 +150,7 @@ public sealed class Shop : GamePanel
         DrawBorder(sb, white, new Rectangle(x, y + 1, PanelW - 20, ItemH - 2));
 
         // Icon placeholder (colored by item category)
-        var iconColor = item.ItemId / 1000000 switch
+        var iconColor = (item.ItemId / 1000000) switch
         {
             2 => new Color(220, 80, 80),   // consumable = red
             4 => new Color(120, 180, 220), // etc = blue
