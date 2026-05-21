@@ -5,6 +5,11 @@ CLAUDE.local.md
 .claude/local-refs.md
 .claude/settings.local.json
 
+# Local-only Claude skills + agents (any directory or file ending in .local)
+.claude/skills/*.local/
+.claude/agents/*.local/
+.claude/**/*.local.md
+
 # Per-machine deploy target for auto-deploy after build
 .deploy.local
 
