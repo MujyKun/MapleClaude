@@ -69,6 +69,13 @@ public sealed class MapleClaudeGame : Game
     /// <summary>Shared registry of tunable items exposed to the debug window.</summary>
     public DebugRegistry DebugRegistry { get; }
 
+    public void ResizeWindow(int width, int height)
+    {
+        _graphics.PreferredBackBufferWidth  = width;
+        _graphics.PreferredBackBufferHeight = height;
+        _graphics.ApplyChanges();
+    }
+
     public MapleClaudeGame(
         ILogger<MapleClaudeGame> logger,
         ILoggerFactory loggerFactory,

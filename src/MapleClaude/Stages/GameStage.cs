@@ -142,7 +142,11 @@ public sealed class GameStage : Stage
         _statusBar.OnStats   = () => _stats!.IsVisible     = !_stats.IsVisible;
         _statusBar.OnOptions = () => _optionMenu!.IsVisible = !_optionMenu.IsVisible;
         _statusBar.OnKeys    = () => _keyConfig!.IsVisible  = !_keyConfig.IsVisible;
-        _statusBar.OnQuit    = () => _quitConfirm!.IsVisible = true;
+        _statusBar.OnQuit     = () => _quitConfirm!.IsVisible = true;
+        _statusBar.OnCashShop = () => Game.StageDirector.Push(new CashShopStage(
+            _loggerFactory.CreateLogger<CashShopStage>(), _ui, Game.Font,
+            Game.GraphicsDevice.PresentationParameters.BackBufferWidth,
+            Game.GraphicsDevice.PresentationParameters.BackBufferHeight));
         _statusBar.OnCharacter = () => _stats!.IsVisible   = !_stats.IsVisible;
         _statusBar.OnMenu    = () => _optionMenu!.IsVisible = !_optionMenu.IsVisible;
 
