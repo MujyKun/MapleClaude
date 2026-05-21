@@ -253,12 +253,16 @@ public sealed class FieldHandlers
         var isCtrl       = calcDmgIndex != 0;
         _logger.LogDebug("MobChangeController: mobId={Id} ctrl={Ctrl}", mobId, isCtrl);
         OnMobChangeController?.Invoke(mobId, isCtrl);
-        // If we're given control, ack with MobApplyCtrl (opcode 228)
+        // If we're given control, ack with MobApplyCtrl (opcode 228).
+        // Per kinoko/handler/field/MobHandler.handleMobApplyCtrl: the server
+        // reads `int dwMobID, int crc` — NOT a byte. Send 0 for crc; the
+        // server only re-checks the controller distance against this packet,
+        // not the crc value.
         if (isCtrl)
         {
             var ack = OutPacket.Of((short)InHeader.MobApplyCtrl);
             ack.WriteInt(mobId);
-            ack.WriteByte(calcDmgIndex);
+            ack.WriteInt(0);    // dwCliCrc (server reads but doesn't validate)
             session.Send(ack);
         }
     }

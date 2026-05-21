@@ -57,6 +57,18 @@ public sealed class ClientSession : IDisposable
 
     public bool IsConnected => _socket?.Connected == true;
 
+    /// <summary>The packet router this session dispatches to. Exposed so stage-owned
+    /// handlers can register opcodes on the same router the session reads from.</summary>
+    public PacketRouter PacketRouter => _router;
+
+    /// <summary>Convenience: subscribe a body-only callback (no session arg) for one S→C opcode.</summary>
+    public void RegisterHandler(OutHeader header, Action<InPacket> callback)
+        => _router.Register(header, (p, _) => callback(p));
+
+    /// <summary>Remove the handler previously registered via <see cref="RegisterHandler(OutHeader, Action{InPacket})"/>.</summary>
+    public void UnregisterHandler(OutHeader header)
+        => _router.Unregister(header);
+
     public ClientSession(ILogger<ClientSession> logger, PacketRouter router)
     {
         _logger = logger;
@@ -96,6 +108,13 @@ public sealed class ClientSession : IDisposable
         DisposeSocket();
         return Task.CompletedTask;
     }
+
+    /// <summary>
+    /// Back-compat alias for <see cref="DrainInbound"/>. Some stages were written
+    /// against an earlier naming and call <c>DrainQueue()</c>; both flush the
+    /// same inbound event/packet queue.
+    /// </summary>
+    public void DrainQueue() => DrainInbound();
 
     /// <summary>
     /// Drains queued events (HandshakeReceived, Disconnected) and packets onto

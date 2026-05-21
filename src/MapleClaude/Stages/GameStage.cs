@@ -101,6 +101,11 @@ public sealed class GameStage : Stage
     private PlayerController? _physics;
     private byte _fieldKey;
 
+    // One-shot debug-log latch for the not-yet-implemented MobMove(227)
+    // outgoing path; see comment block in Update.
+    private bool _loggedMobMoveTodo;
+    private bool _loggedMeleeAttackTodo;
+
     public GameStage(
         ILogger<GameStage> logger,
         ILoggerFactory loggerFactory,
@@ -669,26 +674,26 @@ public sealed class GameStage : Stage
         }
         foreach (var id in deadMobs) _mobs.Remove(id);
 
-        // Mobs we control — send MobMove packets every ~200ms
-        // (simplified: send every frame for now, server will throttle)
-        if (Game.Session.IsConnected)
+        // TODO(wire-correctness): outgoing MobMove(227) is intentionally NOT
+        // sent yet. The upstream shape (per kinoko/handler/field/MobHandler.handleMobMove
+        // lines 48-98) is:
+        //   int dwMobID, short mobCtrlSn, byte actionMask, byte actionAndDir,
+        //   int targetInfo, int multiTargetForBall count + (int,int)*count,
+        //   int randTimeForAreaAttack count + int*count,
+        //   byte (bActive | 16*!cheatRand), int HackedCode,
+        //   int ptTarget.x, int ptTarget.y, int dwHackedCodeCRC,
+        //   <MovePath blob>,
+        //   byte bChasing, byte (pTarget!=0), byte pvcActive.bChasing,
+        //   byte pvcActive.bChasingHack, int pvcActive.tChaseDuration
+        // We don't currently run a mob-side physics simulation so we can't
+        // synthesise a legitimate MovePath. Surface a one-shot debug log
+        // rather than ship a malformed packet that would desync the IV chain.
+        if (Game.Session.IsConnected && _controlledMobs.Count > 0 && !_loggedMobMoveTodo)
         {
-            foreach (var mobId in _controlledMobs)
-            {
-                if (!_mobs.TryGetValue(mobId, out var cmob)) continue;
-                var mp = OutPacket.Of(InHeader.MobMove);
-                mp.WriteInt(mobId);
-                mp.WriteByte(0);   // bNotForceLandingWhenDiscard
-                mp.WriteByte(0);   // bNotChangeAction
-                mp.WriteByte(0);   // actionMask
-                mp.WriteByte(0);   // actionAndDir
-                mp.WriteInt(0);    // targetInfo
-                mp.WriteInt(0);    // multiTargetForBall count
-                mp.WriteInt(0);    // randTimeForAreaAttack count
-                mp.WriteShort((short)cmob.Position.X);
-                mp.WriteShort((short)cmob.Position.Y);
-                Game.Session.Send(mp);
-            }
+            _loggedMobMoveTodo = true;
+            _logger.LogDebug(
+                "MobMove(227) outbound is suppressed — wire shape (mobCtrlSn + HackedCode + MovePath + tail) " +
+                "is not yet implemented; controlled mobs will appear frozen to other clients until this is fixed.");
         }
 
         // Drops
@@ -933,52 +938,39 @@ public sealed class GameStage : Stage
 
     // ── Combat ────────────────────────────────────────────────────────────────
 
-    private const float MeleeRange = 60f;
-
     private void DoMeleeAttack()
     {
         if (!Game.Session.IsConnected) return;
 
-        // Find nearest mob within melee range
-        var playerPos = _physics?.Position ?? _player?.Position ?? Vector2.Zero;
-        var facingLeft = _physics?.FacingLeft ?? _player?.FacingLeft ?? false;
-        MobLook? target = null;
-        var bestDist = MeleeRange;
-        foreach (var mob in _mobs.Values)
+        // TODO(wire-correctness): UserMeleeAttack(47) is suppressed. The
+        // upstream wire shape (per kinoko/handler/user/AttackHandler.handlerUserMeleeAttack)
+        // is roughly:
+        //   byte fieldKey,
+        //   [optional byte if remaining==60],
+        //   int dr0, int dr1,
+        //   byte (nDamagePerMob | 16*nMobCount),
+        //   int dr2, int dr3,
+        //   int skillId, byte combatOrders, int dwKey, int crc32,
+        //   int crc, int crc (SKILLLEVELDATA::GetCrC twice),
+        //   [int keyDown if keydown skill],
+        //   byte flag, short actionAndDir,
+        //   int crc32Svr, byte attackActionType, byte attackSpeed,
+        //   int tAttackTime, int dwID,
+        //   <per mob: int mobId, byte hitAction, byte (foreAction|bLeft<<7),
+        //             byte frameIdx, byte calcDamageStatIndex,
+        //             short hitX, short hitY, short pad, short pad,
+        //             short delay, int damage[hitCount], int crc>,
+        //   short userX, short userY.
+        // The prior naive payload omitted ~17 fields and would desync the IV
+        // chain on first send. Until we wire up the full Attack/AttackInfo
+        // builders, log once and skip.
+        if (!_loggedMeleeAttackTodo)
         {
-            var d = Vector2.Distance(playerPos, mob.Position);
-            if (d < bestDist) { bestDist = d; target = mob; }
+            _loggedMeleeAttackTodo = true;
+            _logger.LogDebug(
+                "UserMeleeAttack(47) outbound is suppressed — wire shape needs the full Attack/AttackInfo " +
+                "builder per kinoko/handler/user/AttackHandler; basic attacks will not register on the server until this is fixed.");
         }
-
-        var p = OutPacket.Of(InHeader.UserMeleeAttack);
-        // AttackInfo.decode structure (simplified for basic attack):
-        // byte: (mobCount & 0x0F) | (hitCount << 4)   — 1 mob, 1 hit
-        // int:  skillId (0 = basic)
-        // byte: skillLevel
-        // int:  attackCrc (0)
-        // int:  keyDown (0)
-        // bool: bLeft (facing)
-        // short: posX
-        // short: posY
-        // Per mob: int mobObjId, byte hitAction, int damage (×hitCount)
-        var mobCount = target != null ? 1 : 0;
-        p.WriteByte((byte)((mobCount & 0x0F) | (1 << 4)));  // 1 hit per mob
-        p.WriteInt(0);      // basic attack
-        p.WriteByte(0);     // slv
-        p.WriteInt(0);      // crc
-        p.WriteInt(0);      // keyDown
-        p.WriteByte(facingLeft ? (byte)1 : (byte)0);
-        p.WriteShort((short)playerPos.X);
-        p.WriteShort((short)playerPos.Y);
-
-        if (target != null)
-        {
-            p.WriteInt(target.MobId);
-            p.WriteByte(0);   // hitAction
-            p.WriteInt(0);    // damage — server recalculates; MobDamaged packet drives the display
-        }
-
-        Game.Session.Send(p);
     }
 
     private void DoPickUp()
@@ -994,12 +986,16 @@ public sealed class GameStage : Stage
         }
         if (nearest is null) return;
 
+        // Wire shape: byte fieldKey, int tickCount, short x, short y,
+        // int dwDropID, int dwCliCrc. Per upstream
+        // kinoko/handler/field/FieldHandler.handleDropPickUpRequest.
         var p = OutPacket.Of(InHeader.DropPickUpRequest);
-        p.WriteByte(0);   // fieldKey
-        p.WriteInt(0);    // tickCount
+        p.WriteByte(_fieldKey);     // bFieldKey — server compares to user.getFieldKey()
+        p.WriteInt(0);              // update_time / tickCount
         p.WriteShort((short)playerPos.X);
         p.WriteShort((short)playerPos.Y);
         p.WriteInt(nearest.DropId);
+        p.WriteInt(0);              // dwCliCrc — server reads but does not validate
         Game.Session.Send(p);
     }
 

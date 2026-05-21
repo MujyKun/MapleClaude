@@ -30,6 +30,7 @@ public sealed class StatsInfo : GamePanel
     public int Level { get; set; } = 1;
     public string Job { get; set; } = "Beginner";
     public int AP { get; set; } = 0;
+    public int SP { get; set; } = 0;
     public int Str { get; set; } = 4;
     public int Dex { get; set; } = 4;
     public int Int { get; set; } = 4;

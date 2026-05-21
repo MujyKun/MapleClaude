@@ -164,6 +164,13 @@ public sealed class InPacket
     /// <summary>Reset the cursor to the start; useful for parsing the same body twice.</summary>
     public void Rewind() => _position = 0;
 
+    /// <summary>
+    /// Returns a fresh <see cref="InPacket"/> over the same backing bytes with
+    /// cursor reset to 0. Useful when a handler needs to relay a packet to
+    /// another handler that also reads from offset 0.
+    /// </summary>
+    public InPacket Clone() => new(_data);
+
     private void EnsureRemaining(int count)
     {
         if (Remaining < count)

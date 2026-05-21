@@ -149,48 +149,7 @@ public sealed class LoginStage : Stage
         var homePos = signTopLeft + _homeOffset;
         var quitPos = signTopLeft + _quitOffset;
 
-<<<<<<< HEAD
-        _btLogin = MakeButton("BtLogin", loginBtnPos, () =>
-        {
-            var id = _idField?.Text ?? string.Empty;
-            var pw = _pwField?.Text  ?? string.Empty;
-            if (id.Length == 0) { _notice?.Show("Enter your MapleStory ID."); return; }
-            if (pw.Length < 5)  { _notice?.Show("Password too short (min 5 chars)."); return; }
-
-            _logger.LogInformation("Login clicked: id='{Id}'", id);
-            _loginWait!.IsVisible = true;
-
-            if (!Game.Session.IsConnected)
-            {
-                _loginWait!.IsVisible = false;
-                _notice?.Show("Not connected to server.\nSet MAPLE_LOGIN_HOST env var.");
-                return;
-            }
-
-            // Override success handler — must capture startCam for WorldSelectStage
-            var startCam = _scene?.Camera ?? Vector2.Zero;
-            var camOff   = _cameraOffset;
-            if (_netHandler != null)
-            {
-                // On CheckPasswordResult OK (resultType == 0) the server sends
-                // world packets followed by WorldInformation(255) end sentinel.
-                // We transition on that end sentinel.
-                _netHandler.OnWorldInfoEnd = () =>
-                {
-                    _loginWait!.IsVisible = false;
-                    if (_sound?.GetItem("UI.img/ScrollUp") is WzSound scrollUp)
-                        Game.AudioPlayer.PlayEffect(scrollUp);
-                    Game.StageDirector.Replace(new WorldSelectStage(
-                        _loggerFactory.CreateLogger<WorldSelectStage>(),
-                        _loggerFactory, _ui, _map, _sound, startCam, camOff));
-                };
-            }
-
-            Game.Session.Send(LoginSender.CheckPassword(id, pw));
-        });
-=======
         _btLogin = MakeButton("BtLogin", loginBtnPos, BeginLogin);
->>>>>>> fe86fbae3fb097ba4152195024244aeadd473942
         _btLoginIdSave = MakeButton("BtLoginIDSave", saveTextPos, () =>
         {
             // The "Save Login ID" text-button acts as a click-target for the
@@ -245,7 +204,7 @@ public sealed class LoginStage : Stage
             OnCancel = () =>
             {
                 _loginWait!.IsVisible = false;
-                Game.Session.Disconnect();
+                _ = Game.Session.DisconnectAsync();
             },
         };
         _notice = new LoginNoticeOverlay(_loader!, _ui, Game.Font, center);
@@ -258,43 +217,9 @@ public sealed class LoginStage : Stage
         RegisterDebugItems();
         ApplyLayout();
 
-<<<<<<< HEAD
-        // Connect to Kinoko login server and register packet handlers
-        _netHandler = new LoginPacketHandler(
-            _loggerFactory.CreateLogger<LoginPacketHandler>(), _loggerFactory);
-
-        _netHandler.AliveAckRequested = () => Game.Session.Send(LoginSender.AliveAck());
-
-        // CheckPasswordResult OK → hide wait overlay, advance to WorldSelectStage
-        // (world list was already received after connect; WorldSelectStage sends SelectWorld)
-        _netHandler.OnLoginFail = msg =>
-        {
-            _loginWait!.IsVisible = false;
-            _notice?.Show(msg);
-        };
-
-        _netHandler.OnWorldInfoEnd = () =>
-        {
-            // World list ready — if login was already successful we advance now.
-            // Normal flow: login click sends CheckPassword; success triggers this path.
-        };
-
-        _netHandler.RegisterAll(Game.Session);
-        Game.Session.OnDisconnected = () =>
-        {
-            if (_loginWait?.IsVisible == true)
-            {
-                _loginWait.IsVisible = false;
-                _notice?.Show("Connection lost.");
-            }
-        };
-
-        _ = ConnectToLoginServerAsync();
-=======
         Game.LoginHandlers.OnCheckPasswordResult += OnCheckPasswordResult;
         Game.Session.HandshakeReceived += OnHandshake;
         Game.Session.Disconnected += OnDisconnected;
->>>>>>> fe86fbae3fb097ba4152195024244aeadd473942
 
         _logger.LogInformation(
             "LoginStage: scene={SceneOk} signboard={Sign} idField={Id} pwField={Pw} buttons={ButtonCount}",
@@ -303,7 +228,6 @@ public sealed class LoginStage : Stage
 
     public override void OnExit()
     {
-        _netHandler?.UnregisterAll(Game.Session);
         UnregisterDebugItems();
         Game.LoginHandlers.OnCheckPasswordResult -= OnCheckPasswordResult;
         Game.Session.HandshakeReceived -= OnHandshake;
@@ -440,13 +364,8 @@ public sealed class LoginStage : Stage
         ApplyCamera();
         ApplyLayout();
 
-<<<<<<< HEAD
-        Game.Session.DrainQueue();   // dispatch incoming server packets on game thread
+        // Inbound packets are drained once per tick by MapleClaudeGame.Update.
         _notice?.Update(gameTime);
-=======
-        // Inbound packets are drained once per tick by MapleClaudeGame.Update; no
-        // need to drain again from each stage.
->>>>>>> fe86fbae3fb097ba4152195024244aeadd473942
         _loginWait?.Update(gameTime);
         _quitConfirm?.Update(gameTime);
 
@@ -670,12 +589,8 @@ public sealed class LoginStage : Stage
             b.Draw(spriteBatch);
         }
 
-<<<<<<< HEAD
-        _notice?.Draw(spriteBatch, Game.WhitePixel);
-=======
-        // Connection / error status — drawn below the signboard. Uses a dark
-        // backdrop pad and yellow text so it's readable against the bright
-        // train backdrop (white-on-white was unreadable).
+        // Connection / error status — drawn below the signboard. Dark pad +
+        // yellow text so it's readable against the bright train backdrop.
         if (!string.IsNullOrEmpty(_statusLabel) && Game.Font is not null)
         {
             var font = Game.Font;
@@ -694,8 +609,10 @@ public sealed class LoginStage : Stage
                 new Color(255, 230, 100));
         }
 
+        // Modal notice (archlo's overlay) — sits above the status label but below the wait/quit overlays.
+        _notice?.Draw(spriteBatch, Game.WhitePixel);
+
         // Overlays — drawn last so they sit on top of everything else.
->>>>>>> fe86fbae3fb097ba4152195024244aeadd473942
         _loginWait?.Draw(spriteBatch, Game.WhitePixel);
         _quitConfirm?.Draw(spriteBatch, Game.WhitePixel);
     }
