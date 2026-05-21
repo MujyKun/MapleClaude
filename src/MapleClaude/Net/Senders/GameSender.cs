@@ -111,4 +111,22 @@ public static class GameSender
         p.WriteByte(0);
         return p;
     }
+
+    // ASK_QUIZ (3): action 1 + string answer
+    public static OutPacket ScriptAnswerQuiz(string answer)
+    {
+        var p = OutPacket.Of(InHeader.UserScriptMessageAnswer);
+        p.WriteByte(3);
+        p.WriteByte(1);
+        p.WriteString(answer);
+        return p;
+    }
+
+    public static OutPacket ScriptAnswerQuizCancel()
+    {
+        var p = OutPacket.Of(InHeader.UserScriptMessageAnswer);
+        p.WriteByte(3);
+        p.WriteByte(0);
+        return p;
+    }
 }

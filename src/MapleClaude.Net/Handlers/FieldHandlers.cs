@@ -489,6 +489,12 @@ public sealed class FieldHandlers
         {
             switch (msgType)
             {
+                case 3: // ASK_QUIZ
+                    args.QuizHint       = p.ReadString();
+                    args.QuizMinLength  = p.ReadShort();
+                    args.QuizMaxLength  = p.ReadShort();
+                    args.QuizRemainTime = p.ReadInt();
+                    break;
                 case 5: // ASK_TEXT
                     args.DefaultText = p.ReadString();
                     args.MinLength   = p.ReadShort();
@@ -636,6 +642,9 @@ public sealed class ScriptMessageArgs
     public int    MinLength, MaxLength;
     // ASK_NUMBER (6)
     public int    DefaultNum, MinNum, MaxNum;
+    // ASK_QUIZ (3)
+    public string QuizHint      = string.Empty;
+    public int    QuizMinLength, QuizMaxLength, QuizRemainTime;
 }
 
 public sealed class FuncKeyEntry   { public int KeyIndex, ActionId; public byte Type; }

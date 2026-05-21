@@ -96,6 +96,23 @@ public sealed class CharLook
         _loaded = _frames.Count > 0;
     }
 
+    /// <summary>
+    /// Drives animation-only update when an external physics controller owns movement.
+    /// Call instead of <see cref="Update(float,bool,bool,bool)"/> after SetField.
+    /// </summary>
+    public void UpdateFromPhysics(float dt, Stance stance, bool facingLeft)
+    {
+        _facingLeft = facingLeft;
+        if (stance != _stance) { _stance = stance; _frame = 0; _frameTimer = 0; }
+        if (_frames.TryGetValue(_stance, out var frames) && frames.Count > 0)
+        {
+            var delayMs = frames[_frame].Delay;
+            if (delayMs <= 0) delayMs = 120;
+            _frameTimer += dt * 1000f;
+            if (_frameTimer >= delayMs) { _frameTimer -= delayMs; _frame = (_frame + 1) % frames.Count; }
+        }
+    }
+
     public void Update(float dt, bool moveLeft, bool moveRight, bool jump)
     {
         // Horizontal movement

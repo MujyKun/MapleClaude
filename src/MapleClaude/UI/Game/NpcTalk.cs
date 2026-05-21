@@ -13,8 +13,9 @@ namespace MapleClaude.UI.Game;
 /// </summary>
 public sealed class NpcTalk : GamePanel
 {
-    public enum DialogType { Ok, YesNo, Next, PrevNext, Menu, AskText, AskNumber }
+    public enum DialogType { Ok, YesNo, Next, PrevNext, Menu, AskText, AskNumber, Quiz }
 
+    private readonly WzTextureLoader _loader;
     private readonly WzSprite? _background;
     private readonly Button? _btOk;
     private readonly Button? _btYes;
@@ -32,6 +33,12 @@ public sealed class NpcTalk : GamePanel
     private int _minNum, _maxNum;
     private bool _numberOnly;
 
+    // Portrait (speaker NPC face)
+    private WzSprite? _portrait;
+
+    // Quiz timer
+    private float _quizTimerSec;
+
     // ── Callbacks ─────────────────────────────────────────────────────────────
     public Action? OnOk { get; set; }
     public Action? OnYes { get; set; }
@@ -44,6 +51,7 @@ public sealed class NpcTalk : GamePanel
 
     public NpcTalk(WzTextureLoader loader, WzPackage? ui, BuiltInFont? font)
     {
+        _loader = loader;
         _font = font;
         _inputField.Font = font;
         IsVisible = false;
@@ -63,6 +71,32 @@ public sealed class NpcTalk : GamePanel
         if (_btNo   != null) _btNo.OnClick   = HandleNo;
         if (_btNext != null) _btNext.OnClick = HandleNext;
         if (_btPrev != null) _btPrev.OnClick = HandlePrev;
+    }
+
+    // ── Portrait ──────────────────────────────────────────────────────────────
+
+    /// <summary>Load NPC portrait from Npc.wz for the given template ID. Safe with null package.</summary>
+    public void LoadPortrait(WzPackage? npcWz, int speakerId)
+    {
+        _portrait = null;
+        if (npcWz is null || speakerId <= 0) return;
+        if (npcWz.GetItem($"{speakerId:D7}.img") is not WzImage img) return;
+        var root = img.Root;
+        // Try common animation states to find a first frame
+        foreach (var stateName in (string[])["stand", "walk", "move", "idle", "default"])
+        {
+            if (root?.Get(stateName) is not WzProperty stateNode) continue;
+            var raw = stateNode.Get("0");
+            WzCanvas? canvas = raw switch
+            {
+                WzCanvas c => c,
+                WzProperty fp => fp.Items.Select(kv => kv.Value as WzCanvas).FirstOrDefault(c => c is not null),
+                _ => null,
+            };
+            if (canvas is null) continue;
+            _portrait = _loader.Load(canvas);
+            break;
+        }
     }
 
     // ── Show methods ──────────────────────────────────────────────────────────
@@ -110,6 +144,19 @@ public sealed class NpcTalk : GamePanel
         IsVisible        = true;
     }
 
+    public void ShowQuiz(string text, string hint = "", int minLen = 0, int maxLen = 24, int remainSec = 60)
+    {
+        _text            = text;
+        _dialogType      = DialogType.Quiz;
+        _menuItems.Clear();
+        _numberOnly      = false;
+        _inputField.Text = hint;
+        _inputField.MaxLength = Math.Max(1, maxLen > 0 ? maxLen : 24);
+        _inputField.IsFocused = true;
+        _quizTimerSec    = Math.Max(1f, remainSec);
+        IsVisible        = true;
+    }
+
     // ── Button handlers ───────────────────────────────────────────────────────
 
     private void HandleOk()
@@ -117,6 +164,7 @@ public sealed class NpcTalk : GamePanel
         switch (_dialogType)
         {
             case DialogType.AskText:
+            case DialogType.Quiz:
                 var txt = _inputField.Text;
                 _inputField.Clear();
                 IsVisible = false;
@@ -148,6 +196,7 @@ public sealed class NpcTalk : GamePanel
         DialogType.Menu      => 80 + Math.Max(1, _menuItems.Count) * 20 + 10,
         DialogType.AskText   => 160,
         DialogType.AskNumber => 160,
+        DialogType.Quiz      => 170,
         _                    => 130,
     };
 
@@ -163,7 +212,20 @@ public sealed class NpcTalk : GamePanel
         _inputField.Position = new Vector2(Position.X + 70, Position.Y + 85);
     }
 
-    public override void Update(GameTime gameTime) => ApplyLayout();
+    public override void Update(GameTime gameTime)
+    {
+        ApplyLayout();
+        if (_dialogType == DialogType.Quiz && IsVisible && _quizTimerSec > 0)
+        {
+            _quizTimerSec -= (float)gameTime.ElapsedGameTime.TotalSeconds;
+            if (_quizTimerSec <= 0)
+            {
+                _quizTimerSec = 0;
+                IsVisible = false;
+                OnNo?.Invoke();   // timeout = cancel
+            }
+        }
+    }
 
     // ── Draw ──────────────────────────────────────────────────────────────────
 
@@ -174,6 +236,10 @@ public sealed class NpcTalk : GamePanel
         ApplyLayout();
         var h = DialogHeight;
 
+        // NPC portrait — drawn above-left of the dialog box
+        if (_portrait != null)
+            _portrait.Draw(sb, Position + new Vector2(6, -90));
+
         // Background
         if (_background != null)
             _background.Draw(sb, Position + new Vector2(234, 65));
@@ -183,7 +249,7 @@ public sealed class NpcTalk : GamePanel
             DrawBorder(sb, white, new Rectangle((int)Position.X, (int)Position.Y, 470, h));
         }
 
-        // Main text (may contain newlines — draw each line)
+        // Main text
         DrawText(sb, _text, Position + new Vector2(10, 10), Color.White, 450);
 
         switch (_dialogType)
@@ -208,6 +274,16 @@ public sealed class NpcTalk : GamePanel
             case DialogType.AskText:
             case DialogType.AskNumber:
                 DrawInputField(sb, white);
+                _btOk?.Draw(sb);
+                _btNo?.Draw(sb);
+                break;
+            case DialogType.Quiz:
+                DrawInputField(sb, white);
+                // Countdown timer
+                var secs     = (int)Math.Ceiling(_quizTimerSec);
+                var timerStr = $"Time: {secs}s";
+                var timerClr = _quizTimerSec < 10 ? new Color(255, 80, 80) : new Color(220, 200, 100);
+                _font?.Draw(sb, timerStr, Position + new Vector2(340, 88), timerClr);
                 _btOk?.Draw(sb);
                 _btNo?.Draw(sb);
                 break;
@@ -237,13 +313,11 @@ public sealed class NpcTalk : GamePanel
         _inputField.Draw(sb, white);
     }
 
-    // Draws text with newline wrapping at maxWidth.
     private void DrawText(SpriteBatch sb, string text, Vector2 origin, Color color, int maxWidth)
     {
         if (_font is null || string.IsNullOrEmpty(text)) return;
-        var lh   = _font.LineHeight + 2;
-        var pos  = origin;
-        // Strip MapleStory format codes before display
+        var lh    = _font.LineHeight + 2;
+        var pos   = origin;
         var clean = StripFormatCodes(text);
         foreach (var rawLine in clean.Split('\n'))
         {
@@ -255,24 +329,20 @@ public sealed class NpcTalk : GamePanel
 
     private static string StripFormatCodes(string text)
     {
-        // Remove #Ln#...#l menu anchors and common codes (#b #d #r #k etc.)
         var sb = new System.Text.StringBuilder(text.Length);
         var i = 0;
         while (i < text.Length)
         {
             if (text[i] == '#' && i + 1 < text.Length)
             {
-                // #L<digit>#
                 if (text[i + 1] == 'L')
                 {
                     var j = i + 2;
                     while (j < text.Length && char.IsDigit(text[j])) j++;
                     if (j < text.Length && text[j] == '#') { i = j + 1; continue; }
                 }
-                // #l (end of list item anchor)
                 if (text[i + 1] == 'l') { i += 2; continue; }
-                // single-letter codes: #b #d #r #k #n #e #f etc.
-                if (i + 1 < text.Length && char.IsLetter(text[i + 1])) { i += 2; continue; }
+                if (char.IsLetter(text[i + 1])) { i += 2; continue; }
             }
             sb.Append(text[i]);
             i++;
@@ -300,25 +370,16 @@ public sealed class NpcTalk : GamePanel
                     450, lh);
                 if (itemRect.Contains(x, y))
                 {
-                    if (down)
-                    {
-                        _menuHover = i;
-                    }
-                    else
-                    {
-                        IsVisible = false;
-                        OnMenuChoice?.Invoke(i);
-                    }
+                    if (down) _menuHover = i;
+                    else { IsVisible = false; OnMenuChoice?.Invoke(i); }
                     return true;
                 }
             }
             _menuHover = -1;
         }
 
-        if (_dialogType is DialogType.AskText or DialogType.AskNumber)
-        {
+        if (_dialogType is DialogType.AskText or DialogType.AskNumber or DialogType.Quiz)
             _inputField.HandleMouseButton(x, y, down);
-        }
 
         return new Rectangle((int)Position.X, (int)Position.Y, 470, DialogHeight).Contains(x, y);
     }
@@ -327,11 +388,11 @@ public sealed class NpcTalk : GamePanel
     {
         if (!IsVisible) return false;
 
-        if (_dialogType is DialogType.AskText or DialogType.AskNumber)
+        if (_dialogType is DialogType.AskText or DialogType.AskNumber or DialogType.Quiz)
         {
             var kb = Keyboard.GetState();
             if (_inputField.OnKeyPress(key, kb)) return true;
-            if (key == Keys.Enter) { HandleOk(); return true; }
+            if (key == Keys.Enter)  { HandleOk(); return true; }
             if (key == Keys.Escape) { IsVisible = false; OnNo?.Invoke(); return true; }
             return true;
         }
@@ -344,7 +405,7 @@ public sealed class NpcTalk : GamePanel
     public override void OnTextInput(char character)
     {
         if (!IsVisible) return;
-        if (_dialogType is DialogType.AskText or DialogType.AskNumber)
+        if (_dialogType is DialogType.AskText or DialogType.AskNumber or DialogType.Quiz)
         {
             if (_numberOnly && !char.IsDigit(character) && character != '-') return;
             _inputField.OnTextInput(character);

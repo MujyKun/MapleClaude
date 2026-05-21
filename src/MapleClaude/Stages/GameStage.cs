@@ -444,9 +444,24 @@ public sealed class GameStage : Stage
         fh.OnScriptMessage += args =>
         {
             if (_npcTalk is null) return;
+            // Load NPC portrait for the speaker
+            _npcTalk.LoadPortrait(_npcWz, args.SpeakerId);
             var msgType = args.MsgType;
             switch (msgType)
             {
+                case 3: // ASK_QUIZ
+                    _npcTalk.ShowQuiz(args.Text, args.QuizHint, args.QuizMinLength, args.QuizMaxLength, args.QuizRemainTime);
+                    _npcTalk.OnTextConfirm = answer =>
+                    {
+                        if (Game.Session.IsConnected)
+                            Game.Session.Send(GameSender.ScriptAnswerQuiz(answer));
+                    };
+                    _npcTalk.OnNo = () =>
+                    {
+                        if (Game.Session.IsConnected)
+                            Game.Session.Send(GameSender.ScriptAnswerQuizCancel());
+                    };
+                    break;
                 case 2: // ASK_MENU
                     var choices = ParseMenuChoices(args.Text);
                     _npcTalk.ShowMenu(args.Text, choices);
@@ -618,6 +633,14 @@ public sealed class GameStage : Stage
             if (_player != null)
             {
                 _player.Position = _physics.Position;
+                var charLookStance = _physics.Stance switch
+                {
+                    Stance.Jump   => CharLook.Stance.Jump,
+                    Stance.Walk1  => CharLook.Stance.Walk1,
+                    Stance.Walk2  => CharLook.Stance.Walk1,
+                    _             => CharLook.Stance.Stand1,
+                };
+                _player.UpdateFromPhysics(dt, charLookStance, _physics.FacingLeft);
             }
             _camera.Target = _physics.Position;
 
@@ -917,7 +940,8 @@ public sealed class GameStage : Stage
         if (!Game.Session.IsConnected) return;
 
         // Find nearest mob within melee range
-        var playerPos = _player?.Position ?? Vector2.Zero;
+        var playerPos = _physics?.Position ?? _player?.Position ?? Vector2.Zero;
+        var facingLeft = _physics?.FacingLeft ?? _player?.FacingLeft ?? false;
         MobLook? target = null;
         var bestDist = MeleeRange;
         foreach (var mob in _mobs.Values)
@@ -943,18 +967,15 @@ public sealed class GameStage : Stage
         p.WriteByte(0);     // slv
         p.WriteInt(0);      // crc
         p.WriteInt(0);      // keyDown
-        p.WriteByte(_player?.FacingLeft == true ? (byte)1 : (byte)0);
+        p.WriteByte(facingLeft ? (byte)1 : (byte)0);
         p.WriteShort((short)playerPos.X);
         p.WriteShort((short)playerPos.Y);
 
         if (target != null)
         {
             p.WriteInt(target.MobId);
-            p.WriteByte(0);             // hitAction
-            p.WriteInt(0);              // damage — server recalculates
-            // Show placeholder damage number immediately (server will confirm via MobDamaged)
-            _dmgNumbers?.Add(0, target.Position, DamageNumber.Kind.MobDamage);
-            target.OnHit(0);
+            p.WriteByte(0);   // hitAction
+            p.WriteInt(0);    // damage — server recalculates; MobDamaged packet drives the display
         }
 
         Game.Session.Send(p);
@@ -963,7 +984,7 @@ public sealed class GameStage : Stage
     private void DoPickUp()
     {
         if (!Game.Session.IsConnected || _drops.Count == 0) return;
-        var playerPos = _player?.Position ?? Vector2.Zero;
+        var playerPos = _physics?.Position ?? _player?.Position ?? Vector2.Zero;
         DropSprite? nearest = null;
         var bestDist = 80f;
         foreach (var drop in _drops.Values)
