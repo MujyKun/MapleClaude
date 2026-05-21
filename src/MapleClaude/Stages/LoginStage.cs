@@ -55,6 +55,7 @@ public sealed class LoginStage : Stage
     private TextField? _pwField;
 
     private LoginWaitOverlay? _loginWait;
+    private LoginNoticeOverlay? _notice;
     private QuitConfirmOverlay? _quitConfirm;
     private LoginPacketHandler? _netHandler;
     private byte[]? _clientKey;
@@ -159,29 +160,32 @@ public sealed class LoginStage : Stage
 
         _btLogin = MakeButton("BtLogin", loginBtnPos, () =>
         {
-            var id  = _idField?.Text ?? string.Empty;
-            var pw  = _pwField?.Text  ?? string.Empty;
-            if (id.Length == 0)  { _notice?.Show("Enter your MapleStory ID."); return; }
-            if (pw.Length < 5)   { _notice?.Show("Password too short (min 5 chars)."); return; }
+            var id = _idField?.Text ?? string.Empty;
+            var pw = _pwField?.Text  ?? string.Empty;
+            if (id.Length == 0) { _notice?.Show("Enter your MapleStory ID."); return; }
+            if (pw.Length < 5)  { _notice?.Show("Password too short (min 5 chars)."); return; }
 
             _logger.LogInformation("Login clicked: id='{Id}'", id);
-
-            // Show connecting overlay; actual transition happens on CheckPasswordResult OK
             _loginWait!.IsVisible = true;
+
+            if (!Game.Session.IsConnected)
+            {
+                _loginWait!.IsVisible = false;
+                _notice?.Show("Not connected to server.\nSet MAPLE_LOGIN_HOST env var.");
+                return;
+            }
+
+            // Override success handler — must capture startCam for WorldSelectStage
             var startCam = _scene?.Camera ?? Vector2.Zero;
             var camOff   = _cameraOffset;
-
-            // Wire the success callback now (we have startCam in scope)
             if (_netHandler != null)
             {
-                _netHandler.OnLoginFail = msg =>
-                {
-                    _loginWait!.IsVisible = false;
-                    _notice?.Show(msg);
-                };
+                // On CheckPasswordResult OK (resultType == 0) the server sends
+                // world packets followed by WorldInformation(255) end sentinel.
+                // We transition on that end sentinel.
                 _netHandler.OnWorldInfoEnd = () =>
                 {
-                    // World list collected — transition to WorldSelect
+                    _loginWait!.IsVisible = false;
                     if (_sound?.GetItem("UI.img/ScrollUp") is WzSound scrollUp)
                         Game.AudioPlayer.PlayEffect(scrollUp);
                     Game.StageDirector.Replace(new WorldSelectStage(
@@ -190,16 +194,7 @@ public sealed class LoginStage : Stage
                 };
             }
 
-            // Send CheckPassword to Kinoko
-            if (Game.Session.IsConnected)
-            {
-                Game.Session.Send(LoginSender.CheckPassword(id, pw));
-            }
-            else
-            {
-                _loginWait!.IsVisible = false;
-                _notice?.Show("Not connected to server. Check MAPLE_LOGIN_HOST.");
-            }
+            Game.Session.Send(LoginSender.CheckPassword(id, pw));
         });
         _btLoginIdSave = MakeButton("BtLoginIDSave", saveTextPos, () =>
         {
@@ -252,8 +247,13 @@ public sealed class LoginStage : Stage
                                  GraphicsDevice.PresentationParameters.BackBufferHeight / 2f);
         _loginWait = new LoginWaitOverlay(_loader!, _ui, Game.Font, center)
         {
-            OnCancel = () => _loginWait!.IsVisible = false,
+            OnCancel = () =>
+            {
+                _loginWait!.IsVisible = false;
+                Game.Session.Disconnect();
+            },
         };
+        _notice = new LoginNoticeOverlay(_loader!, _ui, Game.Font, center);
         _quitConfirm = new QuitConfirmOverlay(_loader!, _ui, Game.Font, center)
         {
             OnYes = () => Game.Exit(),
@@ -267,18 +267,31 @@ public sealed class LoginStage : Stage
         _netHandler = new LoginPacketHandler(
             _loggerFactory.CreateLogger<LoginPacketHandler>(), _loggerFactory);
 
-        _netHandler.OnLoginFail     = msg => _notice?.Show(msg);
         _netHandler.AliveAckRequested = () => Game.Session.Send(LoginSender.AliveAck());
-        _netHandler.OnSelectCharOk  = (host, port) =>
+
+        // CheckPasswordResult OK → hide wait overlay, advance to WorldSelectStage
+        // (world list was already received after connect; WorldSelectStage sends SelectWorld)
+        _netHandler.OnLoginFail = msg =>
         {
-            // Server sent us a channel to migrate to — handled by WorldSelectStage
+            _loginWait!.IsVisible = false;
+            _notice?.Show(msg);
+        };
+
+        _netHandler.OnWorldInfoEnd = () =>
+        {
+            // World list ready — if login was already successful we advance now.
+            // Normal flow: login click sends CheckPassword; success triggers this path.
         };
 
         _netHandler.RegisterAll(Game.Session);
         Game.Session.OnDisconnected = () =>
-            _loginWait?.IsVisible == true ?
-                (_notice?.Show("Connection lost."), _loginWait!.IsVisible = false) :
-                (object?)null;
+        {
+            if (_loginWait?.IsVisible == true)
+            {
+                _loginWait.IsVisible = false;
+                _notice?.Show("Connection lost.");
+            }
+        };
 
         _ = ConnectToLoginServerAsync();
 
@@ -289,6 +302,7 @@ public sealed class LoginStage : Stage
 
     public override void OnExit()
     {
+        _netHandler?.UnregisterAll(Game.Session);
         UnregisterDebugItems();
         Game.AudioPlayer.Stop();
         _loader?.Dispose();
@@ -304,6 +318,7 @@ public sealed class LoginStage : Stage
         ApplyLayout();
 
         Game.Session.DrainQueue();   // dispatch incoming server packets on game thread
+        _notice?.Update(gameTime);
         _loginWait?.Update(gameTime);
         _quitConfirm?.Update(gameTime);
 
@@ -527,6 +542,7 @@ public sealed class LoginStage : Stage
             b.Draw(spriteBatch);
         }
 
+        _notice?.Draw(spriteBatch, Game.WhitePixel);
         _loginWait?.Draw(spriteBatch, Game.WhitePixel);
         _quitConfirm?.Draw(spriteBatch, Game.WhitePixel);
     }
@@ -541,16 +557,9 @@ public sealed class LoginStage : Stage
     {
         if (button != MouseButton.Left) return;
 
-        if (_quitConfirm?.IsVisible == true)
-        {
-            _quitConfirm.HandleMouseButton(x, y, down);
-            return;
-        }
-        if (_loginWait?.IsVisible == true)
-        {
-            _loginWait.HandleMouseButton(x, y, down);
-            return;
-        }
+        if (_notice?.IsVisible == true)    { _notice.HandleMouseButton(x, y, down);    return; }
+        if (_quitConfirm?.IsVisible == true) { _quitConfirm.HandleMouseButton(x, y, down); return; }
+        if (_loginWait?.IsVisible == true)   { _loginWait.HandleMouseButton(x, y, down);   return; }
 
         // Buttons first so they can claim the click.
         foreach (var b in _allButtons)
@@ -584,8 +593,9 @@ public sealed class LoginStage : Stage
 
     public override void OnKeyPress(Keys key)
     {
+        if (_notice?.IsVisible == true)      { _notice.OnKeyPress(key);      return; }
         if (_quitConfirm?.IsVisible == true) { _quitConfirm.OnKeyPress(key); return; }
-        if (_loginWait?.IsVisible == true) { _loginWait.OnKeyPress(key); return; }
+        if (_loginWait?.IsVisible == true)   { _loginWait.OnKeyPress(key);   return; }
 
         switch (key)
         {

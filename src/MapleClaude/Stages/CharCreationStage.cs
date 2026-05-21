@@ -1,6 +1,9 @@
 using MapleClaude.App;
 using MapleClaude.Debug;
 using MapleClaude.Map;
+using MapleClaude.Net;
+using MapleClaude.Net.Handlers;
+using MapleClaude.Net.Senders;
 using MapleClaude.Render;
 using MapleClaude.UI;
 using MapleClaude.Wz;
@@ -198,6 +201,7 @@ public sealed class CharCreationStage : Stage
             var sp = _scene.StartPoint ?? Vector2.Zero;
             _scene.Camera = Vector2.Lerp(_cameraStart, sp + _cameraOffset, SmoothStep(_scrollT));
         }
+        Game.Session.DrainQueue();
         _nameField?.Update(gt);
         ApplyLayout();
     }
@@ -345,19 +349,75 @@ public sealed class CharCreationStage : Stage
 
             case SubScreen.NameEntry:
                 _nameError = ValidateName(_nameField?.Text ?? "");
-                if (_nameError.Length == 0) _subScreen = SubScreen.Confirm;
+                if (_nameError.Length == 0)
+                {
+                    if (Game.Session.IsConnected)
+                    {
+                        // Validate name with server before advancing
+                        Game.Session.RegisterHandler(InHeader.CheckDuplicatedIDResult, pkt =>
+                        {
+                            pkt.DecodeString(); // echo name
+                            var code = pkt.DecodeInt();
+                            if (code == 0) _subScreen = SubScreen.Confirm;
+                            else _nameError = code == 1 ? "Name already in use." : "Invalid name.";
+                            Game.Session.UnregisterHandler(InHeader.CheckDuplicatedIDResult);
+                        });
+                        Game.Session.Send(LoginSender.CheckDuplicatedId(_nameField!.Text));
+                    }
+                    else _subScreen = SubScreen.Confirm;
+                }
                 break;
 
             case SubScreen.Confirm:
+                var name = _nameField?.Text ?? string.Empty;
                 _logger.LogInformation(
-                    "CharCreation: create name='{Name}' male={Male} face={F} hair={H} skin={S} — no packet yet",
-                    _nameField?.Text, _isMale, _faceIdx, _hairIdx, _skinIdx);
-                // Transition to CharSelect (server will create and respond)
-                Game.StageDirector.Replace(new CharSelectStage(
-                    _loggerFactory.CreateLogger<CharSelectStage>(),
-                    _loggerFactory, _ui, _map, _sound,
-                    _worldId, _channelId,
-                    _scene?.Camera ?? Vector2.Zero, _loginCameraOffset));
+                    "CharCreation: create name='{Name}' male={Male} face={F} hair={H} skin={S}",
+                    name, _isMale, _faceIdx, _hairIdx, _skinIdx);
+                if (Game.Session.IsConnected)
+                {
+                    // Register CreateNewCharacterResult handler before sending
+                    var handler = new LoginPacketHandler(
+                        _loggerFactory.CreateLogger<LoginPacketHandler>(), _loggerFactory);
+                    handler.OnCharCreated = charId =>
+                    {
+                        _logger.LogInformation("Char created id={Id} — back to CharSelect", charId);
+                        Game.StageDirector.Replace(new CharSelectStage(
+                            _loggerFactory.CreateLogger<CharSelectStage>(),
+                            _loggerFactory, _ui, _map, _sound,
+                            _worldId, _channelId,
+                            _scene?.Camera ?? Vector2.Zero, _loginCameraOffset));
+                    };
+                    handler.OnCharCreateFail = msg =>
+                    {
+                        _subScreen = SubScreen.Confirm;
+                        // Show error — for now log it; could show a notice overlay
+                        _logger.LogWarning("Create char failed: {Msg}", msg);
+                    };
+                    handler.AliveAckRequested = () => Game.Session.Send(LoginSender.AliveAck());
+                    handler.RegisterAll(Game.Session);
+
+                    // Defaults for appearance items (v95 default explorer starting items)
+                    Game.Session.Send(LoginSender.CreateNewCharacter(
+                        name,
+                        race: 0,          // Explorer
+                        face: 20000 + _faceIdx,
+                        hair: 30000 + _hairIdx,
+                        hairColor: _hairColorIdx,
+                        skin: _skinIdx,
+                        coat: _isMale ? 1040002 : 1041002,
+                        pants: _isMale ? 1060002 : 1061002,
+                        shoes: 1072001,
+                        weapon: 1302000,
+                        male: _isMale));
+                }
+                else
+                {
+                    Game.StageDirector.Replace(new CharSelectStage(
+                        _loggerFactory.CreateLogger<CharSelectStage>(),
+                        _loggerFactory, _ui, _map, _sound,
+                        _worldId, _channelId,
+                        _scene?.Camera ?? Vector2.Zero, _loginCameraOffset));
+                }
                 break;
         }
     }

@@ -1,5 +1,8 @@
 using MapleClaude.App;
 using MapleClaude.Character;
+using MapleClaude.Net;
+using MapleClaude.Net.Handlers;
+using MapleClaude.Net.Senders;
 using System.Linq;
 using MapleClaude.Map;
 using MapleClaude.Render;
@@ -67,6 +70,10 @@ public sealed class GameStage : Stage
     private QuitConfirmOverlay? _quitConfirm;
 
     private readonly List<GamePanel> _panels = new();
+    private GamePacketHandler? _netHandler;
+
+    // Accumulated stat snapshot from server packets
+    private CharStats _charStats = new();
 
     // Input state
     private bool _moveLeft;
@@ -182,6 +189,11 @@ public sealed class GameStage : Stage
         _messenger     = new StatusMessenger(font) { Position = new Vector2(10, 340) };
 
         _statusBar.OnCommunity = () => _userList!.IsVisible = !_userList.IsVisible;
+        _chatBar!.OnSendChat = msg =>
+        {
+            if (Game.Session.IsConnected)
+                Game.Session.Send(GameSender.UserChat(msg));
+        };
 
         _channelSelect.OnChannelChange = ch =>
             _logger.LogInformation("Channel change requested: CH{Ch} — no packet yet", ch);
@@ -196,12 +208,92 @@ public sealed class GameStage : Stage
         _messenger.ShowEXP(12);
         _messenger.ShowBuff("Magic Guard");
 
+        // ── Network packet handler ────────────────────────────────────────────
+        _netHandler = new GamePacketHandler(_loggerFactory.CreateLogger<GamePacketHandler>());
+
+        _netHandler.OnStatChanged = stats =>
+        {
+            _charStats = stats;
+            // Feed to UI panels
+            if (_stats != null)
+            {
+                _stats.Level  = stats.Level;
+                _stats.Job    = JobName(stats.JobId);
+                _stats.Str    = stats.Str;
+                _stats.Dex    = stats.Dex;
+                _stats.Int    = stats.Int;
+                _stats.Luk    = stats.Luk;
+                _stats.Hp     = stats.Hp;   _stats.MaxHp = stats.MaxHp;
+                _stats.Mp     = stats.Mp;   _stats.MaxMp = stats.MaxMp;
+                _stats.AP     = stats.AP;   _stats.SP    = stats.SP;
+            }
+            if (_statusBar != null)
+            {
+                _statusBar.Level    = stats.Level;
+                _statusBar.CharName = stats.Name;
+                _statusBar.Hp       = stats.Hp;   _statusBar.MaxHp = stats.MaxHp;
+                _statusBar.Mp       = stats.Mp;   _statusBar.MaxMp = stats.MaxMp;
+                _statusBar.Exp      = stats.Exp;
+            }
+            if (_charInfo != null)
+            {
+                _charInfo.CharName = stats.Name;
+                _charInfo.Level    = stats.Level;
+                _charInfo.Job      = JobName(stats.JobId);
+            }
+            if (_skill != null) _skill.SP = stats.SP;
+            if (stats.Level > 0)
+                _messenger?.ShowLevelUp(stats.Level);
+        };
+
+        _netHandler.OnUserChat = (name, text, type) =>
+        {
+            var prefix = string.IsNullOrEmpty(name) ? string.Empty : $"[{name}] ";
+            _chatBar?.AddLine(prefix + text);
+        };
+
+        _netHandler.OnFuncKeyInit = _ =>
+        {
+            // Apply server-sent keybindings to KeyConfig
+            if (_netHandler.FuncKeyEntries != null && _keyConfig != null)
+                _keyConfig.ApplyServerKeymap(_netHandler.FuncKeyEntries);
+        };
+
+        _netHandler.OnAliveReq = () =>
+            Game.Session.Send(GameSender.AliveAck());
+
+        _netHandler.OnSystemMsg = (type, _) =>
+        {
+            // Logged at debug level; visible messages arrive via UserChat
+        };
+
+        _channelSelect!.OnChannelChange = ch =>
+        {
+            _logger.LogInformation("Channel change → CH{Ch}", ch);
+            Game.Session.Send(GameSender.TransferChannel(ch - 1));
+        };
+
+        // Wire AP distribution to server packets
+        if (_stats != null)
+        {
+            _stats.OnStrUp = () => { if (Game.Session.IsConnected) Game.Session.Send(GameSender.UserAbilityUp(GameSender.MapleStat.Str)); };
+            _stats.OnDexUp = () => { if (Game.Session.IsConnected) Game.Session.Send(GameSender.UserAbilityUp(GameSender.MapleStat.Dex)); };
+            _stats.OnIntUp = () => { if (Game.Session.IsConnected) Game.Session.Send(GameSender.UserAbilityUp(GameSender.MapleStat.Int)); };
+            _stats.OnLukUp = () => { if (Game.Session.IsConnected) Game.Session.Send(GameSender.UserAbilityUp(GameSender.MapleStat.Luk)); };
+        }
+
+        // Wire SkillBook SP-up to server
+        // (SkillBook.LevelUpRow calls the action per skill row — wired when we have skill data)
+
+        _netHandler.RegisterAll(Game.Session);
+
         Game.AudioPlayer.Stop();
         _logger.LogInformation("GameStage entered — player skin=0, {NpcCount} NPCs", _npcs.Count);
     }
 
     public override void OnExit()
     {
+        _netHandler?.UnregisterAll(Game.Session);
         _loader?.Dispose();
         _loader = null;
         base.OnExit();
@@ -209,6 +301,7 @@ public sealed class GameStage : Stage
 
     public override void Update(GameTime gameTime)
     {
+        Game.Session.DrainQueue();   // dispatch all queued server packets on game thread
         var dt = (float)gameTime.ElapsedGameTime.TotalSeconds;
 
         // Read held keys each frame (movement is frame-continuous)
@@ -373,6 +466,28 @@ public sealed class GameStage : Stage
             case KeyConfig.KeyAction.Jump:           break; // handled in Update
         }
     }
+
+    private static string JobName(int jobId) => jobId switch
+    {
+        0   => "Beginner",
+        100 => "Swordman",  110 => "Fighter",  111 => "Crusader",  112 => "Hero",
+        120 => "Page",      121 => "White Knight", 122 => "Paladin",
+        130 => "Spearman",  131 => "Dragon Knight", 132 => "Dark Knight",
+        200 => "Magician",  210 => "Wizard(F/P)", 211 => "Mage(F/P)", 212 => "Arch Mage(F/P)",
+        220 => "Wizard(I/L)", 221 => "Mage(I/L)", 222 => "Arch Mage(I/L)",
+        230 => "Cleric",    231 => "Priest",    232 => "Bishop",
+        300 => "Bowman",    310 => "Hunter",    311 => "Ranger",    312 => "Bowmaster",
+        320 => "Crossbowman", 321 => "Sniper",  322 => "Marksman",
+        400 => "Thief",     410 => "Assassin",  411 => "Hermit",    412 => "Night Lord",
+        420 => "Bandit",    421 => "Chief Bandit", 422 => "Shadower",
+        500 => "Pirate",    510 => "Brawler",   511 => "Marauder",  512 => "Buccaneer",
+        520 => "Gunslinger", 521 => "Outlaw",   522 => "Corsair",
+        1000 => "Noblesse", 1100 => "Dawn Warrior", 1110 => "Soul Master",
+        1200 => "Blaze Wizard", 1300 => "Wind Archer", 1400 => "Night Walker",
+        1500 => "Thunder Breaker",
+        2000 => "Aran",     2100 => "Aran",
+        _ => $"Job {jobId}",
+    };
 
     private void SpawnNpc(int id, Vector2 worldPos, string name)
     {
