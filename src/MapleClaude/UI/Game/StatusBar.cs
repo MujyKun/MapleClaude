@@ -72,6 +72,9 @@ public sealed class StatusBar : GamePanel
     public Action? OnKeys    { get; set; }
     public Action? OnQuit    { get; set; }
     public Action? OnCashShop{ get; set; }
+    public Action? OnCharacter { get; set; }
+    public Action? OnMenu      { get; set; }
+    public Action? OnCommunity { get; set; }
 
     private readonly BuiltInFont? _font;
 

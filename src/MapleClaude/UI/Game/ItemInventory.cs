@@ -159,7 +159,6 @@ public sealed class ItemInventory : GamePanel
         // Item grid
         var tabItems = _items.Where(it => it.Tab == _activeTab).ToList();
         var scroll = _scrollOffset[_activeTab];
-        var maxSlots = Rows * Cols;
 
         for (var r = 0; r < Rows; r++)
         for (var c = 0; c < Cols; c++)

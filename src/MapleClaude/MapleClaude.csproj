@@ -20,12 +20,13 @@
        on the target machine). Native deps (MonoGame, SDL2, etc.) are extracted to
        a temp folder on first launch.
 
-       These props are always set, but most of them only do anything during the
-       Publish target. RuntimeIdentifier is the exception — setting it would force
-       the regular bin/ layout to be RID-specific, breaking dev iteration — so we
-       only apply it when the AutoPublish target (or `dotnet publish -r win-x64`)
-       is running. -->
-  <PropertyGroup>
+       Everything publish-related lives behind IsAutoPublishing so regular
+       `dotnet build` and `dotnet run` produce a clean RID-less bin/, which lets
+       VS 2026 resolve project references correctly (otherwise SelfContained=true
+       triggers an implicit RuntimeIdentifier=win-x64, and VS fails to find
+       MapleClaude.Net.dll at the win-x64-suffixed path the library project
+       doesn't produce). -->
+  <PropertyGroup Condition="'$(IsAutoPublishing)' == 'true'">
     <PublishSingleFile>true</PublishSingleFile>
     <SelfContained>true</SelfContained>
     <!-- Native libraries (SDL2.dll, FAudio.dll, etc.) get extracted to a temp
@@ -40,16 +41,28 @@
          Without compression the exe is ~120 MB; with the above off, MonoGame
          launches reliably. We pay the size to get a working drag-and-drop. -->
     <EnableCompressionInSingleFile>false</EnableCompressionInSingleFile>
-    <!-- Embed debug info into the exe so crash stacks have line numbers. -->
-    <DebugType>embedded</DebugType>
     <!-- MonoGame uses reflection extensively (content pipeline, type lookup);
          do NOT enable PublishTrimmed or PublishAot until proven safe. -->
     <PublishTrimmed>false</PublishTrimmed>
     <PublishAot>false</PublishAot>
   </PropertyGroup>
 
-  <!-- RID only kicks in during the nested publish pass; regular `dotnet build`
-       and `dotnet run` get clean RID-less bin/ output. -->
+  <!-- Embedded debug info applies always so crash stacks have line numbers,
+       in both dev and shipped exe builds. -->
+  <PropertyGroup>
+    <DebugType>embedded</DebugType>
+  </PropertyGroup>
+
+  <!-- RuntimeIdentifiers (plural) so the assets file is restored with a
+       win-x64 target; needed for the auto-publish target. RuntimeIdentifier
+       (singular) only activates inside the nested publish call so regular
+       dev builds (and VS) stay RID-less in their bin/ paths. The combination
+       SelfContained=true + RuntimeIdentifier (singular) is what triggers VS
+       2026 to look for project-ref'd library assemblies at win-x64-suffixed
+       paths, so the SelfContained PropertyGroup below is also conditional. -->
+  <PropertyGroup>
+    <RuntimeIdentifiers>win-x64</RuntimeIdentifiers>
+  </PropertyGroup>
   <PropertyGroup Condition="'$(IsAutoPublishing)' == 'true'">
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
   </PropertyGroup>
@@ -150,9 +163,11 @@
   <ItemGroup>
     <Using Include="Microsoft.Xna.Framework.Color" Alias="Color" />
     <Using Include="Microsoft.Xna.Framework.Rectangle" Alias="Rectangle" />
+    <Using Include="Microsoft.Xna.Framework.Point" Alias="Point" />
     <Using Include="Microsoft.Xna.Framework.Input.Keys" Alias="Keys" />
     <Using Include="Microsoft.Xna.Framework.Input.ButtonState" Alias="ButtonState" />
     <Using Include="MapleClaude.UI.Button" Alias="Button" />
+    <Using Include="MapleClaude.UI.Game.StatusBar" Alias="StatusBar" />
   </ItemGroup>
 
   <!-- Window/taskbar icon source. Loaded at runtime from this embedded resource

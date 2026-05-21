@@ -10,18 +10,51 @@ MapleClaude is a brand-new client written in C# 13 / .NET 10 with MonoGame for r
 
 | Phase | Scope | Status |
 | ----- | ----- | ------ |
-| 1 | Launch → title → login → world/char select → PIN → channel migrate handoff | in progress |
-| 2 | Field load, player avatar render, no input | planned |
-| 3 | Movement and camera | planned |
-| 4 | Mobs and combat | planned |
-| 5 | NPCs and dialog | planned |
-| 6 | Inventory, items, equips | planned |
-| 7 | Skills, jobs, buffs | planned |
-| 8 | Social (chat, party, friends, guild) | planned |
-| 9 | Drops, pickup, EXP / meso popups | planned |
-| 10 | Polish, audio, AOT publish | planned |
+| 1 | Launch → title → login → world/char select → char create → channel migrate handoff | shipped |
+| 2 | Field load, player avatar render, no input | shipped |
+| 3 | Movement, camera follow, `UserMove(44)` outgoing | shipped |
+| 3.5 | Cosmetic in-game UI (StatusBar, Inventory, SkillBook, MiniMap, KeyConfig, etc.) — UI only, no server data yet | shipped |
+| 4 | Mobs: `MobEnterField` / `MobMove` / `MobChangeController` decode, mob sprites, melee damage display | planned |
+| 5 | NPCs: `NpcEnterField` / click-to-talk / `ScriptMessage` decoder (say/ask/menu/quiz) | planned |
+| 6 | Inventory wire-up: drive the StatusBar's `ItemInventory` / `EquipInventory` panels from real `InventoryOperation` packets, equip swap with stat updates | planned |
+| 7 | Skills + buffs: drive the `SkillBook` panel from `ChangeSkillRecordResult`, send `UserSkillUseRequest`, decode `TemporaryStatSet`/`Reset` for the `BuffList` HUD | planned |
+| 8 | Social: drive the existing `ChatBar` / `UserList` / `Messenger` UIs from real `UserChat` / `FriendResult` / `PartyResult` / `GuildResult` packets | planned |
+| 9 | Drops, pickup, EXP / meso popups (already-built `StatusMessenger` UI hooks up to `DropEnterField` and stat-change packets) | planned |
+| 10 | Polish: full keybind editor, settings persistence, channel transfer (`UserTransferChannelRequest`), Cash Shop migrate (existing `CashShopStage` shell hooks up to real packets), AOT publish | planned |
+
+The cosmetic UI panels added in Phase 3.5 (StatusBar gauges, MiniMap, ItemInventory grid, SkillBook tabs, etc.) currently render with placeholder/demo data; Phases 4–10 progressively wire each one to live server packets without redrawing them.
 
 See `docs/roadmap.md` for the detailed roadmap and `CLAUDE.md` for the contributor / Claude-Code guide.
+
+## Keyboard
+
+| Key | Action |
+| --- | ------ |
+| Tab | Toggle ID ↔ password field on the login screen |
+| Enter | Submit login form / confirm character select |
+| Backspace | Back one screen (e.g. ChannelGrid → WorldList → Login) |
+| ESC | Quit |
+| Arrow keys | Walk / turn in-game (configurable via the in-game `KeyConfig` panel) |
+| Alt / Space / W | Jump in-game (configurable via `KeyConfig`) |
+| Ctrl+A / Ctrl+C / Ctrl+V / Ctrl+X | Select all / copy / paste / cut in text input fields (login ID, character name) |
+| Right Alt | Toggle Korean IME Hangul ↔ English mode when Korean is the active Windows input language |
+
+## Protocol notes
+
+| Opcode | Direction | Where |
+| ------ | --------- | ----- |
+| `CheckPassword(1)` / `CheckPasswordResult(0)` | C↔S | `src/MapleClaude/Stages/LoginStage.cs`, `src/MapleClaude.Net/Handlers/LoginHandlers.cs` |
+| `WorldInfoRequest(4)` / `WorldInformation(10)` | C↔S | `src/MapleClaude/Stages/WorldSelectStage.cs` |
+| `SelectWorld(5)` / `SelectWorldResult(11)` | C↔S | `src/MapleClaude/Stages/WorldSelectStage.cs` |
+| `CheckDuplicatedID(21)` / `CheckDuplicatedIDResult(13)` | C↔S | `src/MapleClaude/Stages/CharCreateStage.cs` |
+| `CreateNewCharacter(22)` / `CreateNewCharacterResult(14)` | C↔S | `src/MapleClaude/Stages/CharCreateStage.cs` |
+| `SelectCharacter(19)` / `SelectCharacterResult(12)` | C↔S | `src/MapleClaude/Stages/CharSelectStage.cs` |
+| `MigrateIn(20)` | C→S | `src/MapleClaude.Net/Session/MigrationCoordinator.cs` |
+| `SetField(141)` | S→C | `src/MapleClaude.Net/Handlers/FieldHandlers.cs` |
+| `UserMove(44)` | C→S | `src/MapleClaude/Stages/FieldStage.cs` + `src/MapleClaude.Net/Packet/MovePathEncoder.cs` |
+| `AliveReq(17)` / `AliveAck(25)` | S↔C | auto-replied in both `LoginHandlers` and `FieldHandlers` |
+
+All Maple wire strings are length-prefixed LE-short + US-ASCII (not UTF-16LE). All multi-byte primitives are little-endian.
 
 ## Setup
 

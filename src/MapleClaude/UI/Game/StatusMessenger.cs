@@ -110,7 +110,7 @@ public sealed class StatusMessenger : GamePanel
 
             var sz  = _font.Measure(m.Text);
             var bgR = new Rectangle((int)Position.X - 2, (int)py - 1, (int)sz.X + 4, (int)sz.Y + 2);
-            sb.Draw(white, bgR, new Color(0, 0, 0, bgAlpha));
+            sb.Draw(white, bgR, new Color((byte)0, (byte)0, (byte)0, bgAlpha));
             _font.Draw(sb, m.Text, new Vector2(Position.X, py), textColor);
 
             py -= LineHeight;
