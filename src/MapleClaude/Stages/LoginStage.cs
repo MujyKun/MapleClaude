@@ -1,9 +1,9 @@
 using MapleClaude.App;
 using MapleClaude.Debug;
 using MapleClaude.Map;
-using MapleClaude.Net;
 using MapleClaude.Net.Handlers;
-using MapleClaude.Net.Senders;
+using MapleClaude.Net.Packet;
+using MapleClaude.Net.Session;
 using MapleClaude.Render;
 using MapleClaude.UI;
 using MapleClaude.Wz;
@@ -11,11 +11,6 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Xna.Framework;
 using Microsoft.Xna.Framework.Graphics;
 using Microsoft.Xna.Framework.Input;
-// Note: Sound.wz/UI.img/BtMouseOver hover-sound playback deferred — MonoGame
-// SoundEffect.FromStream only accepts WAV PCM, but v95 sound nodes contain
-// MP3-encoded payloads. Wiring an MP3→PCM bridge (NAudio or similar) is the
-// follow-up branch. The cursor change to the hover variant covers the
-// immediate "this is clickable" UX in the meantime.
 
 namespace MapleClaude.Stages;
 
@@ -57,16 +52,12 @@ public sealed class LoginStage : Stage
     private LoginWaitOverlay? _loginWait;
     private LoginNoticeOverlay? _notice;
     private QuitConfirmOverlay? _quitConfirm;
-    private LoginPacketHandler? _netHandler;
-    private byte[]? _clientKey;
-
-    // Kinoko login server address — configurable via env var MAPLE_LOGIN_HOST
-    private static string LoginHost =>
-        System.Environment.GetEnvironmentVariable("MAPLE_LOGIN_HOST") ?? "127.0.0.1";
-    private static int LoginPort =>
-        int.TryParse(System.Environment.GetEnvironmentVariable("MAPLE_LOGIN_PORT"), out var p) ? p : 8484;
 
     private readonly List<Button> _allButtons = new();
+
+    // Network status text shown above the panel while waiting for handshake / CheckPasswordResult.
+    private string _statusLabel = string.Empty;
+    private bool _connecting;
 
     // Mutable layout state exposed to the debug window for live tuning.
     // Values were nailed down by hand using drag-mode in the debug window
@@ -158,6 +149,7 @@ public sealed class LoginStage : Stage
         var homePos = signTopLeft + _homeOffset;
         var quitPos = signTopLeft + _quitOffset;
 
+<<<<<<< HEAD
         _btLogin = MakeButton("BtLogin", loginBtnPos, () =>
         {
             var id = _idField?.Text ?? string.Empty;
@@ -196,6 +188,9 @@ public sealed class LoginStage : Stage
 
             Game.Session.Send(LoginSender.CheckPassword(id, pw));
         });
+=======
+        _btLogin = MakeButton("BtLogin", loginBtnPos, BeginLogin);
+>>>>>>> fe86fbae3fb097ba4152195024244aeadd473942
         _btLoginIdSave = MakeButton("BtLoginIDSave", saveTextPos, () =>
         {
             // The "Save Login ID" text-button acts as a click-target for the
@@ -263,6 +258,7 @@ public sealed class LoginStage : Stage
         RegisterDebugItems();
         ApplyLayout();
 
+<<<<<<< HEAD
         // Connect to Kinoko login server and register packet handlers
         _netHandler = new LoginPacketHandler(
             _loggerFactory.CreateLogger<LoginPacketHandler>(), _loggerFactory);
@@ -294,6 +290,11 @@ public sealed class LoginStage : Stage
         };
 
         _ = ConnectToLoginServerAsync();
+=======
+        Game.LoginHandlers.OnCheckPasswordResult += OnCheckPasswordResult;
+        Game.Session.HandshakeReceived += OnHandshake;
+        Game.Session.Disconnected += OnDisconnected;
+>>>>>>> fe86fbae3fb097ba4152195024244aeadd473942
 
         _logger.LogInformation(
             "LoginStage: scene={SceneOk} signboard={Sign} idField={Id} pwField={Pw} buttons={ButtonCount}",
@@ -304,10 +305,132 @@ public sealed class LoginStage : Stage
     {
         _netHandler?.UnregisterAll(Game.Session);
         UnregisterDebugItems();
+        Game.LoginHandlers.OnCheckPasswordResult -= OnCheckPasswordResult;
+        Game.Session.HandshakeReceived -= OnHandshake;
+        Game.Session.Disconnected -= OnDisconnected;
         Game.AudioPlayer.Stop();
         _loader?.Dispose();
         _loader = null;
         base.OnExit();
+    }
+
+    private void BeginLogin()
+    {
+        if (_connecting)
+        {
+            return;
+        }
+        var id = _idField?.Text ?? string.Empty;
+        var pw = _pwField?.Text ?? string.Empty;
+        if (string.IsNullOrEmpty(id))
+        {
+            _statusLabel = "Please enter your ID.";
+            return;
+        }
+        _connecting = true;
+        _statusLabel = $"Connecting to {Game.LoginHost}:{Game.LoginPort}...";
+        _logger.LogInformation("Login clicked: id='{Id}' connecting to {Host}:{Port}", id, Game.LoginHost, Game.LoginPort);
+
+        // Show the modal LoginWait overlay; cancel disconnects + clears status.
+        if (_loginWait != null)
+        {
+            _loginWait.IsVisible = true;
+            _loginWait.OnCancel = () =>
+            {
+                _loginWait.IsVisible = false;
+                _ = Game.Session.DisconnectAsync();
+                _statusLabel = "Login cancelled.";
+                _connecting = false;
+            };
+        }
+
+        // ScrollUp SFX while we open the socket.
+        if (_sound?.GetItem("UI.img/ScrollUp") is WzSound scrollUp)
+        {
+            Game.AudioPlayer.PlayEffect(scrollUp);
+        }
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await Game.Session.ConnectAsync(Game.LoginHost, Game.LoginPort);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "ConnectAsync failed");
+                _statusLabel = "Connect failed.";
+                _connecting = false;
+                if (_loginWait != null)
+                {
+                    _loginWait.IsVisible = false;
+                }
+            }
+        });
+    }
+
+    private void OnHandshake(HandshakeInfo info)
+    {
+        var id = _idField?.Text ?? string.Empty;
+        var pw = _pwField?.Text ?? string.Empty;
+        _logger.LogInformation("Handshake received; sending CheckPassword");
+
+        // CheckPassword(1) wire (Kinoko LoginHandler.handleCheckPassword):
+        //   string id, string pwd, byte[16] machineId, int gameRoomClient=0,
+        //   byte gameStartMode=2, byte worldId=0, byte channelId=0, byte[4] partnerCode
+        var p = OutPacket.Of(InHeader.CheckPassword);
+        p.WriteString(id);
+        p.WriteString(pw);
+        p.WriteBytes(Game.Session.MachineId);
+        p.WriteInt(0);          // gameRoomClient
+        p.WriteByte(2);         // gameStartMode (regular login)
+        p.WriteByte(0);         // worldId
+        p.WriteByte(0);         // channelId
+        p.WriteBytes(new byte[4]);
+        Game.Session.Send(p);
+        _statusLabel = "Authenticating...";
+    }
+
+    private void OnCheckPasswordResult(CheckPasswordResultArgs args)
+    {
+        if (_loginWait != null)
+        {
+            _loginWait.IsVisible = false;
+        }
+
+        if (!args.Success)
+        {
+            _statusLabel = args.ResultCode switch
+            {
+                4 => "Incorrect password.",
+                5 => "Account not registered.",
+                7 => "Already connected.",
+                9 => "Login error.",
+                _ => $"Login failed (code {args.ResultCode}).",
+            };
+            _connecting = false;
+            _ = Game.Session.DisconnectAsync();
+            return;
+        }
+        _statusLabel = "Login OK — fetching worlds...";
+        var startCam = _scene?.Camera ?? Vector2.Zero;
+        Game.StageDirector.Replace(new WorldSelectStage(
+            _loggerFactory.CreateLogger<WorldSelectStage>(),
+            _loggerFactory, _ui, _map, _sound, startCam, _cameraOffset));
+    }
+
+    private void OnDisconnected(Exception? ex)
+    {
+        if (!_connecting)
+        {
+            return;
+        }
+        if (_loginWait != null)
+        {
+            _loginWait.IsVisible = false;
+        }
+        _statusLabel = ex != null ? "Disconnected: " + ex.Message : "Disconnected.";
+        _connecting = false;
     }
 
     public override void Update(GameTime gameTime)
@@ -317,8 +440,13 @@ public sealed class LoginStage : Stage
         ApplyCamera();
         ApplyLayout();
 
+<<<<<<< HEAD
         Game.Session.DrainQueue();   // dispatch incoming server packets on game thread
         _notice?.Update(gameTime);
+=======
+        // Inbound packets are drained once per tick by MapleClaudeGame.Update; no
+        // need to drain again from each stage.
+>>>>>>> fe86fbae3fb097ba4152195024244aeadd473942
         _loginWait?.Update(gameTime);
         _quitConfirm?.Update(gameTime);
 
@@ -542,7 +670,32 @@ public sealed class LoginStage : Stage
             b.Draw(spriteBatch);
         }
 
+<<<<<<< HEAD
         _notice?.Draw(spriteBatch, Game.WhitePixel);
+=======
+        // Connection / error status — drawn below the signboard. Uses a dark
+        // backdrop pad and yellow text so it's readable against the bright
+        // train backdrop (white-on-white was unreadable).
+        if (!string.IsNullOrEmpty(_statusLabel) && Game.Font is not null)
+        {
+            var font = Game.Font;
+            var size = font.Measure(_statusLabel);
+            var padX = 6;
+            var padY = 2;
+            var baseY = _signboardCenter.Y + (_signboard?.Height ?? 0) / 2f + 6;
+            var rect = new Rectangle(
+                (int)(w / 2f - size.X / 2f) - padX,
+                (int)baseY - padY,
+                (int)size.X + padX * 2,
+                font.LineHeight + padY * 2);
+            spriteBatch.Draw(Game.WhitePixel, rect, new Color(0, 0, 0, 180));
+            font.Draw(spriteBatch, _statusLabel,
+                new Vector2(w / 2f - size.X / 2f, baseY),
+                new Color(255, 230, 100));
+        }
+
+        // Overlays — drawn last so they sit on top of everything else.
+>>>>>>> fe86fbae3fb097ba4152195024244aeadd473942
         _loginWait?.Draw(spriteBatch, Game.WhitePixel);
         _quitConfirm?.Draw(spriteBatch, Game.WhitePixel);
     }
@@ -597,6 +750,18 @@ public sealed class LoginStage : Stage
         if (_quitConfirm?.IsVisible == true) { _quitConfirm.OnKeyPress(key); return; }
         if (_loginWait?.IsVisible == true)   { _loginWait.OnKeyPress(key);   return; }
 
+        // Give the focused text field first crack at the key (Ctrl-A/C/V/X,
+        // arrows, Home/End, Delete). It returns true if it consumed the key.
+        var kb = Microsoft.Xna.Framework.Input.Keyboard.GetState();
+        if (_idField?.IsFocused == true && _idField.OnKeyPress(key, kb))
+        {
+            return;
+        }
+        if (_pwField?.IsFocused == true && _pwField.OnKeyPress(key, kb))
+        {
+            return;
+        }
+
         switch (key)
         {
             case Keys.Tab:
@@ -610,30 +775,10 @@ public sealed class LoginStage : Stage
             case Keys.Enter:
                 _btLogin?.OnClick?.Invoke();
                 break;
-            case Keys.Back:
-                if (_idField?.IsFocused == true)
-                {
-                    _idField.OnTextInput('\b');
-                }
-                else if (_pwField?.IsFocused == true)
-                {
-                    _pwField.OnTextInput('\b');
-                }
-                break;
-        }
-    }
-
-    private async Task ConnectToLoginServerAsync()
-    {
-        try
-        {
-            await Game.Session.ConnectLoginAsync(LoginHost, LoginPort).ConfigureAwait(false);
-            _logger.LogInformation("Login server connected — sending WorldInfoRequest");
-            Game.Session.Send(LoginSender.WorldInfoRequest());
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Could not connect to login server {H}:{P}", LoginHost, LoginPort);
+            // Backspace is intentionally NOT handled here — MonoGame's
+            // Window.TextInput already fires '\b' which routes through
+            // OnTextInput → TextField.OnTextInput. Handling it again here
+            // would delete two characters per press.
         }
     }
 

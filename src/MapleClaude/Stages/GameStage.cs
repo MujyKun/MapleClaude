@@ -5,6 +5,8 @@ using MapleClaude.Net.Handlers;
 using MapleClaude.Net.Senders;
 using System.Linq;
 using MapleClaude.Map;
+using MapleClaude.Net.Handlers;
+using MapleClaude.Net.Packet;
 using MapleClaude.Render;
 using MapleClaude.UI;
 using MapleClaude.UI.Game;
@@ -79,6 +81,11 @@ public sealed class GameStage : Stage
     private bool _moveLeft;
     private bool _moveRight;
     private bool _jumpPressed;
+
+    // Network state populated by SetField.
+    private FieldScene? _field;
+    private PlayerController? _physics;
+    private byte _fieldKey;
 
     public GameStage(
         ILogger<GameStage> logger,
@@ -288,15 +295,72 @@ public sealed class GameStage : Stage
         _netHandler.RegisterAll(Game.Session);
 
         Game.AudioPlayer.Stop();
-        _logger.LogInformation("GameStage entered — player skin=0, {NpcCount} NPCs", _npcs.Count);
+
+        // Subscribe to the channel-server SetField so we can load the real map
+        // + spawn position when the migration handoff completes.
+        Game.FieldHandlers.OnSetField += OnSetField;
+
+        _logger.LogInformation("GameStage entered — awaiting SetField from channel");
     }
 
     public override void OnExit()
     {
+<<<<<<< HEAD
         _netHandler?.UnregisterAll(Game.Session);
+=======
+        Game.FieldHandlers.OnSetField -= OnSetField;
+>>>>>>> fe86fbae3fb097ba4152195024244aeadd473942
         _loader?.Dispose();
         _loader = null;
         base.OnExit();
+    }
+
+    private void OnSetField(SetFieldArgs args)
+    {
+        _fieldKey = args.FieldKey;
+        if (args.Stat is null || _map is null)
+        {
+            return;
+        }
+        try
+        {
+            _field = new FieldScene(_loggerFactory.CreateLogger<FieldScene>(), _map, _loader!);
+            _field.Load(args.Stat.PosMap);
+            _physics = new PlayerController(_field);
+            _field.PlacePlayerAtPortal(_physics, args.Stat.Portal);
+            // Re-position archlo's CharLook to the spawn point.
+            if (_player != null)
+            {
+                _player.Position = _physics.Position;
+            }
+            _camera.Target = _physics.Position;
+            _camera.MapBounds = _field.Info.HasVR
+                ? new Rectangle(_field.Info.VRLeft, _field.Info.VRTop,
+                                _field.Info.VRRight - _field.Info.VRLeft,
+                                _field.Info.VRBottom - _field.Info.VRTop)
+                : _camera.MapBounds;
+            _logger.LogInformation("SetField processed — mapId={Map} portal={Portal}",
+                args.Stat.PosMap, args.Stat.Portal);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to load field {Id}", args.Stat.PosMap);
+        }
+    }
+
+    private void SendUserMove(byte[] movePathBlob)
+    {
+        // UserMove(44): int 0; int 0; byte fieldKey; int 0; int 0; int crc; int crc32; <MovePath blob>.
+        var p = OutPacket.Of(InHeader.UserMove);
+        p.WriteInt(0);
+        p.WriteInt(0);
+        p.WriteByte(_fieldKey);
+        p.WriteInt(0);
+        p.WriteInt(0);
+        p.WriteInt(0);
+        p.WriteInt(0);
+        p.WriteBytes(movePathBlob);
+        Game.Session.Send(p);
     }
 
     public override void Update(GameTime gameTime)
@@ -304,16 +368,41 @@ public sealed class GameStage : Stage
         Game.Session.DrainQueue();   // dispatch all queued server packets on game thread
         var dt = (float)gameTime.ElapsedGameTime.TotalSeconds;
 
-        // Read held keys each frame (movement is frame-continuous)
+        // Read held keys each frame (movement is frame-continuous).
+        // Movement is driven by the live KeyConfig bindings so user rebinds
+        // (rebound MoveLeft/MoveRight/Jump in the in-game F12 dialog) take
+        // effect without needing a restart.
         var kb = Keyboard.GetState();
-        // Movement driven by KeyConfig bindings — respects user rebinds
-        _moveLeft   = _keyConfig!.IsActionDown(kb, KeyConfig.KeyAction.MoveLeft);
-        _moveRight  = _keyConfig!.IsActionDown(kb, KeyConfig.KeyAction.MoveRight);
+        _moveLeft = _keyConfig!.IsActionDown(kb, KeyConfig.KeyAction.MoveLeft);
+        _moveRight = _keyConfig!.IsActionDown(kb, KeyConfig.KeyAction.MoveRight);
         _jumpPressed = _keyConfig!.IsActionDown(kb, KeyConfig.KeyAction.Jump);
 
-        // Player + camera
-        if (_player != null)
+        // Foothold physics — only when the channel server has sent SetField and
+        // a map is loaded. Drives both the CharLook visual position and the
+        // outbound UserMove(44) packets.
+        if (_physics != null)
         {
+            var input = new PlayerInput
+            {
+                Left = _moveLeft,
+                Right = _moveRight,
+                JumpPressed = _jumpPressed,
+            };
+            _physics.Update(input, dt);
+            if (_player != null)
+            {
+                _player.Position = _physics.Position;
+            }
+            _camera.Target = _physics.Position;
+
+            if (_physics.TryFlushMovePath(out var blob))
+            {
+                SendUserMove(blob);
+            }
+        }
+        else if (_player != null)
+        {
+            // Pre-SetField: archlo's CharLook handles its own demo physics.
             _player.Update(dt, _moveLeft, _moveRight, _jumpPressed);
             _camera.Target = _player.Position;
         }
@@ -355,9 +444,18 @@ public sealed class GameStage : Stage
         var w = pp.BackBufferWidth;
         var h = pp.BackBufferHeight;
 
-        // Map background (placeholder tiled green)
-        sb.Draw(Game.WhitePixel, new Rectangle(0, 0, w, h), new Color(34, 85, 34));
-        DrawGroundPlane(sb, w, h);
+        // Field backdrop — use the real Map.wz scene if SetField has been
+        // processed; otherwise fall back to archlo's tinted green ground plane.
+        if (_field != null)
+        {
+            _field.Camera.Position = _camera.Position;
+            _field.Draw(sb, Game.WhitePixel, w, h);
+        }
+        else
+        {
+            sb.Draw(Game.WhitePixel, new Rectangle(0, 0, w, h), new Color(34, 85, 34));
+            DrawGroundPlane(sb, w, h);
+        }
 
         // NPCs (world-space → screen)
         foreach (var npc in _npcs)

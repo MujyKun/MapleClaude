@@ -1,8 +1,9 @@
 using MapleClaude.App;
 using MapleClaude.Debug;
 using MapleClaude.Map;
-using MapleClaude.Net;
-using MapleClaude.Net.Senders;
+using MapleClaude.Net.Handlers;
+using MapleClaude.Net.Packet;
+using MapleClaude.Net.Session;
 using MapleClaude.Render;
 using MapleClaude.UI;
 using MapleClaude.Wz;
@@ -130,6 +131,32 @@ public sealed class CharSelectStage : Stage
         _loginCameraOffset = loginCameraOffset;
     }
 
+    /// <summary>
+    /// Re-entry constructor used by <see cref="CharCreateStage"/> after a
+    /// successful <c>CreateNewCharacterResult</c>. World / channel / camera
+    /// state are restored from the previous selection (held on the session)
+    /// so we land back on the same scrolled-up camera position. The character
+    /// list itself lives on <c>Game.Session.Characters</c>; the
+    /// <paramref name="existingCharacters"/> parameter is retained only so
+    /// the old call site doesn't have to be reshaped.
+    /// </summary>
+    public CharSelectStage(
+        ILogger<CharSelectStage> logger,
+        ILoggerFactory loggerFactory,
+        WzPackage? ui,
+        WzPackage? map,
+        WzPackage? sound,
+        IReadOnlyList<Domain.CharacterEntry> existingCharacters)
+        : this(logger, loggerFactory, ui, map, sound,
+               worldId: 0, channelId: 0,
+               cameraStart: Vector2.Zero, loginCameraOffset: new Vector2(0, -1216))
+    {
+        // existingCharacters is held by Game.Session.Characters already; the
+        // parameter is kept for API stability with CharCreateStage's old
+        // re-entry call site.
+        _ = existingCharacters;
+    }
+
     public override void OnEnter(MapleClaudeGame game)
     {
         base.OnEnter(game);
@@ -173,22 +200,59 @@ public sealed class CharSelectStage : Stage
         ApplyLayout();
         RegisterDebugItems();
 
+        Game.LoginHandlers.OnSelectCharacterResult += OnSelectCharacterResult;
+        Game.LoginHandlers.OnDeleteCharacterResult += OnDeleteCharacterResult;
+
         _logger.LogInformation(
-            "CharSelectStage: world={World} channel={Channel} scene={Scene}",
-            _worldId, _channelId, _scene != null);
+            "CharSelectStage: world={World} channel={Channel} chars={N}",
+            _worldId, _channelId, Game.Session.Characters.Count);
     }
 
     public override void OnExit()
     {
+        Game.LoginHandlers.OnSelectCharacterResult -= OnSelectCharacterResult;
+        Game.LoginHandlers.OnDeleteCharacterResult -= OnDeleteCharacterResult;
         UnregisterDebugItems();
         _loader?.Dispose();
         _loader = null;
         base.OnExit();
     }
 
+    private void OnSelectCharacterResult(SelectCharacterResultArgs args)
+    {
+        if (!args.Success || args.ChannelHost is null)
+        {
+            _notice?.Show($"Could not enter character (code {args.ResultCode}).", LoginNoticeOverlay.NoticeType.Ok);
+            return;
+        }
+        _logger.LogInformation("SelectCharacterResult ok charId={Cid} — starting migration", args.CharacterId);
+        var fieldStage = new GameStage(
+            _loggerFactory.CreateLogger<GameStage>(),
+            _loggerFactory, _ui, _map, _sound, Game.CharWz, Game.NpcWz);
+        Game.StageDirector.Replace(fieldStage);
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await Game.Migration.BeginMigrateAsync(args.ChannelHost, args.ChannelPort, args.CharacterId);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Migration failed");
+            }
+        });
+    }
+
+    private void OnDeleteCharacterResult(DeleteCharacterArgs args)
+    {
+        _notice?.Show(args.Success
+            ? $"Character {args.CharacterId} deleted."
+            : $"Delete failed (code {args.ResultCode}).",
+            LoginNoticeOverlay.NoticeType.Ok);
+    }
+
     public override void Update(GameTime gameTime)
     {
-        Game.Session.DrainQueue();
         if (_scene != null)
         {
             var dt = (float)gameTime.ElapsedGameTime.TotalSeconds;
@@ -341,58 +405,22 @@ public sealed class CharSelectStage : Stage
     private void OnSelectClicked()
     {
         if (_selectedSlot < 0) return;
-        var charId = SelectedCharId;
-        _logger.LogInformation("CharSelect: BtSelect slot={Slot} charId={Id}", _selectedSlot, charId);
+        var characters = Game.Session.Characters;
+        if (_selectedSlot >= characters.Count)
+        {
+            _notice?.Show("That slot has no character yet.", LoginNoticeOverlay.NoticeType.Ok);
+            return;
+        }
+        var entry = characters[_selectedSlot];
+        _logger.LogInformation("CharSelect: BtSelect — slot {Slot} charId={Cid} name={Name}",
+            _selectedSlot, entry.Stat.CharacterId, entry.Stat.Name);
 
-        if (Game.Session.IsConnected && charId > 0)
-        {
-            // Send SelectCharacter — server replies with SelectCharacterResult (host:port)
-            // then we reconnect to channel server and send MigrateIn
-            Game.Session.RegisterHandler(InHeader.SelectCharacterResult, pkt =>
-            {
-                var result = pkt.DecodeByte();
-                pkt.DecodeByte(); // 0
-                if (result != 0)
-                {
-                    _notice?.Show($"Select character failed (code {result}).");
-                    return;
-                }
-                var ipBytes   = pkt.DecodeArray(4);
-                var host      = $"{ipBytes[0]}.{ipBytes[1]}.{ipBytes[2]}.{ipBytes[3]}";
-                var port      = pkt.DecodeShort();
-                var receivedId = pkt.DecodeInt();
-                _logger.LogInformation("SelectCharacterResult: migrate to {Host}:{Port}", host, port);
-                MigrateToChannel(host, port, charId);
-            });
-            Game.Session.Send(LoginSender.SelectCharacter(charId));
-        }
-        else
-        {
-            // UI-only mode
-            EnterGameStage();
-        }
-    }
-
-    private async void MigrateToChannel(string host, int port, int charId)
-    {
-        try
-        {
-            await Game.Session.ConnectChannelAsync(host, port).ConfigureAwait(false);
-            Game.Session.Send(LoginSender.MigrateIn(charId, new byte[8]));
-            EnterGameStage();
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Failed to migrate to channel {Host}:{Port}", host, port);
-            _notice?.Show("Connection to game server failed.");
-        }
-    }
-
-    private void EnterGameStage()
-    {
-        Game.StageDirector.Replace(new GameStage(
-            _loggerFactory.CreateLogger<GameStage>(),
-            _loggerFactory, _ui, _map, _sound, Game.CharWz, Game.NpcWz));
+        // SelectCharacter(19): int charId, string macAddress, string macAddressWithHddSerial.
+        var p = OutPacket.Of(InHeader.SelectCharacter);
+        p.WriteInt(entry.Stat.CharacterId);
+        p.WriteString(MachineIdProvider.GetFakeMacAddress());
+        p.WriteString(MachineIdProvider.GetFakeMacAddressWithHddSerial());
+        Game.Session.Send(p);
     }
 
     private void OnNewClicked()

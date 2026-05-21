@@ -4,7 +4,7 @@ This is the multi-phase build plan for MapleClaude. Each phase ships its own
 `phase-N/*` branch family, an entry-criteria definition, an exit-criteria
 definition, and a single PR to `master` at completion.
 
-## Phase 1 — Pre-game flow (in progress)
+## Phase 1 — Pre-game flow (shipped)
 
 **Scope.** Launch → title → login → world/server select → character list →
 character create → PIN entry (dormant on Kinoko) → channel migrate handoff.
@@ -17,37 +17,41 @@ channel migrate, and logs:
 MigrateIn ACK observed — Phase 2 boundary reached
 ```
 
-**Branch family.**
+## Phase 2 — Field load & avatar render (shipped)
 
-- `phase-1/scaffolding` — solution, project layout, CLAUDE docs, `.claude/`, build green.
-- `phase-1/cipher` — Crypto/ + cipher tests.
-- `phase-1/packet-io` — Packet/, OpCodes.cs, gen-opcodes.
-- `phase-1/wz-reader` — Wz/ + fixture tests.
-- `phase-1/render-bootstrap` — MapleClaudeGame, MonoGame loop, sprite atlas.
-- `phase-1/login-stage` — Title, Login, WorldSelect, ChannelSelect stages.
-- `phase-1/char-select` — CharSelect, CharCreate stages + AvatarData.
-- `phase-1/pin-stage` — PinStage (wired dormant).
-- `phase-1/migrate-handoff` — MigrationCoordinator + final wire-up.
-
-## Phase 2 — Field load & avatar render
-
-**Scope.** Decode `SetField` (the first in-game packet after migrate). Load
+**Scope.** Decode `SetField(141)` (the first in-game packet after migrate). Load
 the player's starting map from `Map.wz/Map/Map<prefix>/<mapId>.img` (footholds,
-ladders, portals, layers, backgrounds). Render the player's `AvatarLook`
+portals, multi-layer backgrounds). Render the player's `AvatarLook`
 (body + head + face + hair + equips from `Character.wz`) standing on the map.
-No input yet — just the standing pose.
 
 **Exit criteria.** First-spawn map renders with the player's avatar visible at
 the correct starting coordinates and standing on the correct foothold.
 
-## Phase 3 — Movement & camera
+## Phase 3 — Movement & camera (shipped)
 
-**Scope.** Keyboard input → `UserMove` packet construction (the v95 move-path
-encoding with 12 sub-actions). Gravity, jump, run, walk. Camera follows the
-player with viewport clipping and parallax background scrolling.
+**Scope.** Arrow keys → walk; Alt → jump. v95 `UserMove(44)` outgoing
+encoding (the move-path with NORMAL / JUMP / TELEPORT / STAT_CHANGE /
+START_FALL_DOWN / FLYING_BLOCK sub-action categories). Gravity, foothold
+ground-snap. `Camera2D` follow with deadzone + VR-bounds clamp.
 
-**Exit criteria.** Player can walk, jump, fall through one-way platforms, and
-move between adjacent portals on a single map.
+**Exit criteria.** Player can walk, jump, and fall onto footholds; the server
+accepts the outgoing `UserMove` packets without disconnecting.
+
+## Phase 3.5 — In-game cosmetic UI (shipped)
+
+**Scope.** All the in-game panels needed for a real client are laid out
+visually with placeholder data — no server wiring yet. `StatusBar` (HP/MP/EXP
+gauges + quickslot bar + submenu buttons), `ChatBar`, `MiniMap`,
+`ItemInventory` (4-tab grid), `EquipInventory`, `SkillBook`, `StatsInfo`
+(STR/DEX/INT/LUK + AP), `QuestLog`, `KeyConfig` (re-bindable keys),
+`OptionMenu`, `CharInfo`, `Shop`, `NpcTalk`, `Notice`, `WorldMap`,
+`UserList` (friends/party/guild tabs), `ChannelSelect`, `StatusMessenger`
+(floating loot/exp/buff messages), `CashShopStage` (1024×768 overlay with
+9 category tabs + paginated 7×2 item grid).
+
+**Exit criteria.** Every panel renders with sensible placeholder data,
+opens/closes via its StatusBar button or hotkey, and the user can interact
+with the controls. Server data wiring is deferred to phases 4–10.
 
 ## Phase 4 — Mobs & combat
 

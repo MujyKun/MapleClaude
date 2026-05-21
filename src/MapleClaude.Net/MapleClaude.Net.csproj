@@ -15,4 +15,15 @@
     <ProjectReference Include="..\MapleClaude.Domain\MapleClaude.Domain.csproj" />
   </ItemGroup>
 
+  <!-- VS2026 design-time builds sometimes don't pick up newly-added folders
+       even after .vs/ is deleted. Listing the folders explicitly forces both
+       the IDE and CLI to include them. SDK-style auto-glob still applies,
+       so this is just belt-and-suspenders, not a replacement. -->
+  <ItemGroup>
+    <Folder Include="Crypto\" />
+    <Folder Include="Handlers\" />
+    <Folder Include="Packet\" />
+    <Folder Include="Session\" />
+  </ItemGroup>
+
 </Project>

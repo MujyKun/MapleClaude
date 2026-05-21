@@ -291,8 +291,10 @@ public sealed class SkillBook : GamePanel
     }
 
     private static void DrawBorder(SpriteBatch sb, Texture2D white, Rectangle r)
+        => DrawBorder(sb, white, r, new Color(70, 70, 90));
+
+    private static void DrawBorder(SpriteBatch sb, Texture2D white, Rectangle r, Color c)
     {
-        var c = new Color(70, 70, 90);
         sb.Draw(white, new Rectangle(r.X, r.Y, r.Width, 1), c);
         sb.Draw(white, new Rectangle(r.X, r.Bottom - 1, r.Width, 1), c);
         sb.Draw(white, new Rectangle(r.X, r.Y, 1, r.Height), c);

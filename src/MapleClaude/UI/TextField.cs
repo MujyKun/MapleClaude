@@ -1,22 +1,26 @@
 using System.Text;
+using MapleClaude.Platform;
 using MapleClaude.Render;
 using Microsoft.Xna.Framework;
 using Microsoft.Xna.Framework.Graphics;
+using Microsoft.Xna.Framework.Input;
 
 namespace MapleClaude.UI;
 
 /// <summary>
-/// A minimal text input field. Renders the supplied WZ background sprite,
-/// captures typed characters via <see cref="OnTextInput"/>, and shows the
-/// character count as a row of small dots (true text rendering arrives with
-/// the font system on the next branch). When focused, a blinking caret
-/// shows at the end.
+/// Text input field with caret + selection + Ctrl-A/C/V/X clipboard support
+/// (via WinForms <c>Clipboard</c>). Renders the supplied WZ background sprite
+/// when no text is typed; switches to the real text once anything is entered.
+/// Password mode renders dots instead of glyphs.
 /// </summary>
 public sealed class TextField
 {
     private readonly StringBuilder _text = new();
     private float _caretTimer;
     private bool _caretVisible = true;
+    private int _caret;
+    private int _selectionStart = -1; // -1 = no selection
+    private int _scrollPx;            // pixel offset of the visible text window into the full string
 
     public Vector2 Position { get; set; }
     public int Width { get; set; } = 160;
@@ -27,12 +31,29 @@ public sealed class TextField
     public WzSprite? Background { get; set; }
     public BuiltInFont? Font { get; set; }
 
-    public string Text => _text.ToString();
+    public string Text
+    {
+        get => _text.ToString();
+        set
+        {
+            _text.Clear();
+            if (!string.IsNullOrEmpty(value))
+            {
+                _text.Append(value);
+            }
+            _caret = _text.Length;
+            _selectionStart = -1;
+        }
+    }
 
-    public void Clear() => _text.Clear();
+    public Rectangle Bounds => new((int)Position.X, (int)Position.Y, Width, Height);
 
-    public Rectangle Bounds => new(
-        (int)Position.X, (int)Position.Y, Width, Height);
+    public void Clear()
+    {
+        _text.Clear();
+        _caret = 0;
+        _selectionStart = -1;
+    }
 
     public void OnTextInput(char ch)
     {
@@ -42,9 +63,14 @@ public sealed class TextField
         }
         if (ch == '\b')
         {
-            if (_text.Length > 0)
+            if (HasSelection)
             {
-                _text.Length--;
+                DeleteSelection();
+            }
+            else if (_caret > 0)
+            {
+                _text.Remove(_caret - 1, 1);
+                _caret--;
             }
             return;
         }
@@ -52,11 +78,16 @@ public sealed class TextField
         {
             return;
         }
+        if (HasSelection)
+        {
+            DeleteSelection();
+        }
         if (_text.Length >= MaxLength)
         {
             return;
         }
-        _text.Append(ch);
+        _text.Insert(_caret, ch);
+        _caret++;
     }
 
     /// <summary>Returns true if the click was inside the field (changing focus).</summary>
@@ -68,7 +99,76 @@ public sealed class TextField
         }
         var inside = Bounds.Contains(x, y);
         IsFocused = inside;
+        if (inside)
+        {
+            _selectionStart = -1;
+            _caret = _text.Length;
+        }
         return inside;
+    }
+
+    /// <summary>Process a non-character key (Ctrl-combos, arrows, Home/End, Delete). Returns true if consumed.</summary>
+    public bool OnKeyPress(Keys key, KeyboardState kb)
+    {
+        if (!IsFocused)
+        {
+            return false;
+        }
+        var ctrl = kb.IsKeyDown(Keys.LeftControl) || kb.IsKeyDown(Keys.RightControl);
+        var shift = kb.IsKeyDown(Keys.LeftShift) || kb.IsKeyDown(Keys.RightShift);
+        if (ctrl)
+        {
+            switch (key)
+            {
+                case Keys.A:
+                    _selectionStart = 0;
+                    _caret = _text.Length;
+                    return true;
+                case Keys.C:
+                    CopyToClipboard();
+                    return true;
+                case Keys.X:
+                    CopyToClipboard();
+                    if (HasSelection)
+                    {
+                        DeleteSelection();
+                    }
+                    return true;
+                case Keys.V:
+                    PasteFromClipboard();
+                    return true;
+            }
+        }
+        switch (key)
+        {
+            case Keys.Left:
+                EnsureSelectionAnchor(shift);
+                if (_caret > 0) { _caret--; }
+                return true;
+            case Keys.Right:
+                EnsureSelectionAnchor(shift);
+                if (_caret < _text.Length) { _caret++; }
+                return true;
+            case Keys.Home:
+                EnsureSelectionAnchor(shift);
+                _caret = 0;
+                return true;
+            case Keys.End:
+                EnsureSelectionAnchor(shift);
+                _caret = _text.Length;
+                return true;
+            case Keys.Delete:
+                if (HasSelection)
+                {
+                    DeleteSelection();
+                }
+                else if (_caret < _text.Length)
+                {
+                    _text.Remove(_caret, 1);
+                }
+                return true;
+        }
+        return false;
     }
 
     public void Update(GameTime gameTime)
@@ -83,9 +183,6 @@ public sealed class TextField
 
     public void Draw(SpriteBatch sb, Texture2D whitePixel)
     {
-        // WZ background contains baked-in placeholder text ("Maple ID" /
-        // "Password"). Hide it once the user has typed something so the
-        // typed content isn't visually competing with the placeholder.
         var hasText = _text.Length > 0;
         if (Background is not null)
         {
@@ -101,17 +198,78 @@ public sealed class TextField
             sb.Draw(whitePixel, new Rectangle(Bounds.X, Bounds.Y + Bounds.Height - 1, Bounds.Width, 1), Color.DarkGray);
         }
 
-        // Text rendering: non-password fields with a font render the real
-        // typed text. Password fields (or any field without a font available)
-        // fall back to the dot placeholder so the ID doesn't look censored
-        // and the PW doesn't expose its content.
         const int textPadX = 6;
+        var visibleWidth = Math.Max(0, Width - textPadX * 2);
         int caretX;
         if (!IsPassword && Font is not null)
         {
+            var fullText = _text.ToString();
             var textY = (int)Position.Y + (Height - Font.LineHeight) / 2;
-            Font.Draw(sb, _text.ToString(), new Vector2((int)Position.X + textPadX, textY), Color.Black);
-            caretX = (int)Position.X + textPadX + (int)Font.Measure(_text.ToString()).X;
+            var caretPx = (int)Font.Measure(fullText[.._caret]).X;
+
+            // Keep the caret inside the field by scrolling the text horizontally.
+            // Caret-on-right edge: snap _scrollPx so the caret hugs the right side.
+            // Caret-on-left edge: snap so the caret hugs the left side.
+            if (caretPx - _scrollPx > visibleWidth)
+            {
+                _scrollPx = caretPx - visibleWidth;
+            }
+            if (caretPx - _scrollPx < 0)
+            {
+                _scrollPx = caretPx;
+            }
+            if (_scrollPx < 0)
+            {
+                _scrollPx = 0;
+            }
+
+            var leftX = (int)Position.X + textPadX;
+            var rightX = leftX + visibleWidth;
+
+            // Selection highlight, clipped to the visible window.
+            if (HasSelection && IsFocused)
+            {
+                var (lo, hi) = OrderedSelection();
+                var loPx = (int)Font.Measure(fullText[..lo]).X;
+                var hiPx = (int)Font.Measure(fullText[..hi]).X;
+                var screenLo = Math.Max(leftX, leftX + (loPx - _scrollPx));
+                var screenHi = Math.Min(rightX, leftX + (hiPx - _scrollPx));
+                if (screenHi > screenLo)
+                {
+                    var rect = new Rectangle(screenLo, textY, screenHi - screenLo, Font.LineHeight);
+                    sb.Draw(whitePixel, rect, new Color(80, 130, 220, 180));
+                }
+            }
+
+            // Find the first/last chars visible inside [_scrollPx, _scrollPx + visibleWidth].
+            // Linear scan — fine for our short (≤ 64-char) login/password fields.
+            var firstIdx = 0;
+            for (var i = 0; i <= fullText.Length; i++)
+            {
+                if ((int)Font.Measure(fullText[..i]).X >= _scrollPx)
+                {
+                    firstIdx = Math.Max(0, i - 1);
+                    break;
+                }
+                firstIdx = i;
+            }
+            var lastIdx = firstIdx;
+            for (var i = firstIdx + 1; i <= fullText.Length; i++)
+            {
+                if ((int)Font.Measure(fullText[..i]).X > _scrollPx + visibleWidth + 8)
+                {
+                    break;
+                }
+                lastIdx = i;
+            }
+            if (lastIdx > firstIdx)
+            {
+                var visible = fullText[firstIdx..lastIdx];
+                var firstPx = (int)Font.Measure(fullText[..firstIdx]).X;
+                Font.Draw(sb, visible, new Vector2(leftX + (firstPx - _scrollPx), textY), Color.Black);
+            }
+
+            caretX = leftX + (caretPx - _scrollPx);
         }
         else
         {
@@ -120,17 +278,147 @@ public sealed class TextField
             const int dotSpacing = 7;
             var startX = (int)Position.X + textPadX;
             var dotY = (int)Position.Y + (Height - dotSize) / 2;
-            for (var i = 0; i < _text.Length && startX + i * dotSpacing + dotSize < Position.X + Width - 8; i++)
+            // Dot mode: scroll by dot units so the caret stays visible.
+            var caretDotPx = _caret * dotSpacing;
+            if (caretDotPx - _scrollPx > visibleWidth)
             {
-                var rect = new Rectangle(startX + i * dotSpacing, dotY, dotSize, dotSize);
-                sb.Draw(whitePixel, rect, dotColor);
+                _scrollPx = caretDotPx - visibleWidth;
             }
-            caretX = startX + Math.Min(_text.Length, MaxLength) * dotSpacing;
+            if (caretDotPx - _scrollPx < 0)
+            {
+                _scrollPx = caretDotPx;
+            }
+            if (_scrollPx < 0)
+            {
+                _scrollPx = 0;
+            }
+            for (var i = 0; i < _text.Length; i++)
+            {
+                var dotX = startX + i * dotSpacing - _scrollPx;
+                if (dotX + dotSize < startX)
+                {
+                    continue;
+                }
+                if (dotX > startX + visibleWidth)
+                {
+                    break;
+                }
+                sb.Draw(whitePixel, new Rectangle(dotX, dotY, dotSize, dotSize), dotColor);
+            }
+            caretX = startX + caretDotPx - _scrollPx;
         }
 
-        if (IsFocused && _caretVisible)
+        // Caret only renders if it's inside the visible window.
+        if (IsFocused && _caretVisible && !HasSelection)
         {
-            sb.Draw(whitePixel, new Rectangle(caretX, (int)Position.Y + 4, 1, Height - 8), Color.Black);
+            var leftEdge = (int)Position.X + textPadX;
+            var rightEdge = leftEdge + visibleWidth;
+            if (caretX >= leftEdge && caretX <= rightEdge)
+            {
+                sb.Draw(whitePixel, new Rectangle(caretX, (int)Position.Y + 4, 1, Height - 8), Color.Black);
+            }
         }
+    }
+
+    private bool HasSelection => _selectionStart >= 0 && _selectionStart != _caret;
+
+    private (int Lo, int Hi) OrderedSelection()
+    {
+        var lo = Math.Min(_selectionStart, _caret);
+        var hi = Math.Max(_selectionStart, _caret);
+        lo = Math.Clamp(lo, 0, _text.Length);
+        hi = Math.Clamp(hi, 0, _text.Length);
+        return (lo, hi);
+    }
+
+    private void EnsureSelectionAnchor(bool shift)
+    {
+        if (shift)
+        {
+            if (_selectionStart < 0)
+            {
+                _selectionStart = _caret;
+            }
+        }
+        else
+        {
+            _selectionStart = -1;
+        }
+    }
+
+    private void DeleteSelection()
+    {
+        if (!HasSelection)
+        {
+            return;
+        }
+        var (lo, hi) = OrderedSelection();
+        _text.Remove(lo, hi - lo);
+        _caret = lo;
+        _selectionStart = -1;
+    }
+
+    private void CopyToClipboard()
+    {
+        // Don't expose password content via clipboard.
+        if (IsPassword)
+        {
+            return;
+        }
+        string toCopy;
+        if (HasSelection)
+        {
+            var (lo, hi) = OrderedSelection();
+            toCopy = _text.ToString(lo, hi - lo);
+        }
+        else
+        {
+            toCopy = _text.ToString();
+        }
+        if (!string.IsNullOrEmpty(toCopy))
+        {
+            // ClipboardHelper uses direct user32 P/Invoke — works from the
+            // MonoGame main thread (which runs MTA; WinForms Clipboard would throw).
+            ClipboardHelper.SetText(toCopy);
+        }
+    }
+
+    private void PasteFromClipboard()
+    {
+        var clip = ClipboardHelper.GetText();
+        if (string.IsNullOrEmpty(clip))
+        {
+            return;
+        }
+        // Drop control chars (newline, tab, etc.) — single-line field.
+        var sb = new StringBuilder(clip.Length);
+        foreach (var c in clip)
+        {
+            if (c < ' ' || c == '\x7F')
+            {
+                continue;
+            }
+            sb.Append(c);
+        }
+        var insert = sb.ToString();
+        if (insert.Length == 0)
+        {
+            return;
+        }
+        if (HasSelection)
+        {
+            DeleteSelection();
+        }
+        var roomLeft = MaxLength - _text.Length;
+        if (roomLeft <= 0)
+        {
+            return;
+        }
+        if (insert.Length > roomLeft)
+        {
+            insert = insert[..roomLeft];
+        }
+        _text.Insert(_caret, insert);
+        _caret += insert.Length;
     }
 }

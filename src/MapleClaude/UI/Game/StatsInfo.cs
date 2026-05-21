@@ -130,7 +130,7 @@ public sealed class StatsInfo : GamePanel
 
         _font?.Draw(sb, "Character Stats", new Vector2(px + 34, py + 5), new Color(220, 200, 150));
 
-        var y = py + 22;
+        float y = py + 22;
         DrawRow(sb, "Level",    Level.ToString(), px, ref y, false);
         DrawRow(sb, "Job",      Job,              px, ref y, false);
         y += 4;
@@ -138,8 +138,8 @@ public sealed class StatsInfo : GamePanel
         // AP banner (shown when AP > 0)
         if (AP > 0)
         {
-            sb.Draw(white, new Rectangle(px + 4, y - 2, PanelW - 8, RowH + 2), new Color(60, 50, 0, 180));
-            DrawBorder(sb, white, new Rectangle(px + 4, y - 2, PanelW - 8, RowH + 2), new Color(200, 160, 0));
+            sb.Draw(white, new Rectangle(px + 4, (int)y - 2, PanelW - 8, RowH + 2), new Color(60, 50, 0, 180));
+            DrawBorder(sb, white, new Rectangle(px + 4, (int)y - 2, PanelW - 8, RowH + 2), new Color(200, 160, 0));
         }
         _font?.Draw(sb, "AP", new Vector2(px + ColLabel, y), new Color(200, 200, 200));
         _font?.Draw(sb, AP.ToString(), new Vector2(px + ColValue, y),
@@ -167,7 +167,7 @@ public sealed class StatsInfo : GamePanel
         // Auto-assign button (when AP > 0)
         if (AP > 0 && _font != null)
         {
-            var btnR = new Rectangle(px + PanelW - 80, y + 2, 74, 16);
+            var btnR = new Rectangle(px + PanelW - 80, (int)y + 2, 74, 16);
             sb.Draw(white, btnR, new Color(40, 40, 10));
             DrawBorder(sb, white, btnR, new Color(180, 150, 30));
             _font.Draw(sb, "Auto Assign", new Vector2(btnR.X + 4, btnR.Y + 2), new Color(220, 200, 60));

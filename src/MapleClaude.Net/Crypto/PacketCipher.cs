@@ -20,22 +20,29 @@ public static class PacketCipher
     public const int HeaderSize = 4;
 
     /// <summary>
-    /// The 16-bit XOR sentinel mixed into the framing header. Both sides
-    /// encode and decode-validate against this value, not against
-    /// <see cref="GameVersion"/> directly. (The upstream Kinoko Java
-    /// <c>PacketDecoder</c> has a check that compares the decoded value to
-    /// <c>GAME_VERSION</c> instead of <c>~GAME_VERSION</c>; the wire bytes
-    /// produced by its encoder always decode to <c>0xFFFF - GAME_VERSION</c>,
-    /// so the comparison there would always fail. We follow the wire
-    /// protocol, which is what the running v95 client expects.)
+    /// XOR sentinel the client mixes into outgoing header bytes. Matches
+    /// upstream Kinoko's server-side <c>RECV_VERSION = GAME_VERSION</c>
+    /// check: after the server XORs the header against its own IV[2..3],
+    /// the resulting word must equal <see cref="GameVersion"/> or it drops
+    /// the connection (<c>PacketDecoder.decode</c>).
     /// </summary>
-    private const int VersionSentinel = 0xFFFF - GameVersion;
+    private const int SendSentinel = GameVersion;
 
     /// <summary>
-    /// Builds the 4-byte little-endian framing header for an outgoing packet.
-    /// Format: <c>[ rawSeq:short(LE) | dataLen:short(LE) ]</c> where
-    /// <c>rawSeq = (iv[2] | iv[3]&lt;&lt;8) ^ (0xFFFF - GameVersion)</c> and
-    /// <c>dataLen = payloadLen ^ rawSeq</c>.
+    /// XOR sentinel the client expects in incoming header bytes. The server's
+    /// <c>PacketEncoder</c> uses <c>SEND_VERSION = 0xFFFF - GAME_VERSION</c>
+    /// when wrapping outgoing packets; XOR'd against the client's recv IV
+    /// the result must equal this value.
+    /// </summary>
+    private const int RecvSentinel = 0xFFFF - GameVersion;
+
+    /// <summary>
+    /// Builds the 4-byte little-endian framing header for an outgoing
+    /// (client→server) packet. Format: <c>[ rawSeq:short(LE) | dataLen:short(LE) ]</c>
+    /// where <c>rawSeq = (iv[2] | iv[3]&lt;&lt;8) ^ GameVersion</c> and
+    /// <c>dataLen = payloadLen ^ rawSeq</c>. The server validates by XOR-ing
+    /// the header against its mirror IV and expects the result to equal
+    /// <see cref="GameVersion"/>.
     /// </summary>
     /// <param name="payloadLen">Length of the encrypted body that will follow the header.</param>
     /// <param name="iv">The current send IV. Read-only here.</param>
@@ -51,7 +58,7 @@ public static class PacketCipher
             throw new ArgumentException("destination must be at least 4 bytes", nameof(destination));
         }
 
-        var rawSeq = ((iv[2] & 0xFF) | ((iv[3] & 0xFF) << 8)) ^ VersionSentinel;
+        var rawSeq = ((iv[2] & 0xFF) | ((iv[3] & 0xFF) << 8)) ^ SendSentinel;
         var dataLen = payloadLen ^ rawSeq;
 
         BinaryPrimitives.WriteUInt16LittleEndian(destination[..2], (ushort)rawSeq);
@@ -59,9 +66,10 @@ public static class PacketCipher
     }
 
     /// <summary>
-    /// Parses an incoming 4-byte header. Validates the encoded version matches
-    /// <see cref="GameVersion"/>; if it doesn't, <c>Valid</c> is <c>false</c>
-    /// and the caller should drop the connection.
+    /// Parses an incoming (server→client) 4-byte header. Validates the
+    /// encoded version matches <see cref="RecvSentinel"/> — the value
+    /// produced by upstream Kinoko's <c>PacketEncoder</c>; if it doesn't,
+    /// <c>Valid</c> is <c>false</c> and the caller should drop the connection.
     /// </summary>
     /// <param name="header">The 4 header bytes the server sent.</param>
     /// <param name="iv">The current recv IV. Read-only here.</param>
@@ -77,7 +85,7 @@ public static class PacketCipher
         }
 
         var version = ((header[0] ^ iv[2]) & 0xFF) | (((header[1] ^ iv[3]) & 0xFF) << 8);
-        if (version != VersionSentinel)
+        if (version != RecvSentinel)
         {
             return (false, 0);
         }

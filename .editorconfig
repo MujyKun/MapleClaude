@@ -23,7 +23,7 @@ csharp_style_var_elsewhere = true:silent
 csharp_style_expression_bodied_methods = when_on_single_line:silent
 csharp_style_expression_bodied_properties = when_on_single_line:suggestion
 csharp_prefer_simple_using_statement = true:suggestion
-csharp_prefer_braces = true:warning
+csharp_prefer_braces = true:suggestion
 csharp_using_directive_placement = outside_namespace:warning
 csharp_style_prefer_primary_constructors = true:suggestion
 csharp_style_prefer_readonly_struct = true:suggestion
@@ -34,8 +34,9 @@ dotnet_diagnostic.CS8602.severity = error
 dotnet_diagnostic.CS8603.severity = error
 dotnet_diagnostic.CS8618.severity = error
 
-# Unused
-dotnet_diagnostic.IDE0005.severity = warning   # unused using
+# Unused — kept as suggestion (not error) so incoming PRs with cosmetic
+# unused-using noise don't fail TreatWarningsAsErrors. Clean up over time.
+dotnet_diagnostic.IDE0005.severity = suggestion   # unused using
 dotnet_diagnostic.CA1822.severity = suggestion # member can be static
 
 # Naming
