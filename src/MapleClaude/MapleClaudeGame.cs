@@ -1,5 +1,7 @@
 using MapleClaude.App;
 using MapleClaude.Debug;
+using MapleClaude.Net.Handlers;
+using MapleClaude.Net.Session;
 using MapleClaude.Platform;
 using MapleClaude.Render;
 using MapleClaude.Stages;
@@ -33,6 +35,7 @@ public sealed class MapleClaudeGame : Game
     private WzPackage? _soundWz;
     private WzPackage? _charWz;
     private WzPackage? _npcWz;
+    private WzPackage? _itemWz;
     private WzTextureLoader? _cursorLoader;
     private MapleCursor? _cursor;
     private UI.BuiltInFont? _font;
@@ -63,18 +66,39 @@ public sealed class MapleClaudeGame : Game
 
     public Texture2D WhitePixel => _white;
     public WzAudioPlayer AudioPlayer { get; }
+    public WzPackage? UiWz => _uiWz;
+    public WzPackage? MapWz => _mapWz;
+    public WzPackage? SoundWz => _soundWz;
     public WzPackage? CharWz => _charWz;
     public WzPackage? NpcWz => _npcWz;
-
-    /// <summary>Network session — null until a stage calls ConnectLoginAsync.</summary>
-    public MapleSession Session { get; }
+    public WzPackage? ItemWz => _itemWz;
+    // Back-compat alias for stages that referenced the longer name.
+    public WzPackage? CharacterWz => _charWz;
 
     /// <summary>Shared registry of tunable items exposed to the debug window.</summary>
     public DebugRegistry DebugRegistry { get; }
 
+    /// <summary>Network session used by every stage that wants to send/receive packets.</summary>
+    public ClientSession Session { get; }
+
+    /// <summary>Wired login-server S→C handlers (events).</summary>
+    public LoginHandlers LoginHandlers { get; }
+
+    /// <summary>Wired channel-server S→C handlers (events).</summary>
+    public FieldHandlers FieldHandlers { get; }
+
+    /// <summary>Migration coordinator (login → channel handoff).</summary>
+    public MigrationCoordinator Migration { get; }
+
+    /// <summary>Resolved login server host (env <c>MAPLECLAUDE_LOGIN_HOST</c>, default 127.0.0.1).</summary>
+    public string LoginHost { get; }
+
+    /// <summary>Resolved login server port (env <c>MAPLECLAUDE_LOGIN_PORT</c>, default 8484).</summary>
+    public int LoginPort { get; }
+
     public void ResizeWindow(int width, int height)
     {
-        _graphics.PreferredBackBufferWidth  = width;
+        _graphics.PreferredBackBufferWidth = width;
         _graphics.PreferredBackBufferHeight = height;
         _graphics.ApplyChanges();
     }
@@ -83,14 +107,23 @@ public sealed class MapleClaudeGame : Game
         ILogger<MapleClaudeGame> logger,
         ILoggerFactory loggerFactory,
         IConfiguration config,
-        DebugRegistry debugRegistry)
+        DebugRegistry debugRegistry,
+        ClientSession session,
+        LoginHandlers loginHandlers,
+        FieldHandlers fieldHandlers,
+        MigrationCoordinator migration)
     {
         _logger = logger;
         _loggerFactory = loggerFactory;
         _wzDir = ResolveWzDir(config);
         AudioPlayer = new WzAudioPlayer(loggerFactory.CreateLogger<WzAudioPlayer>());
-        Session     = new MapleSession(loggerFactory.CreateLogger<MapleSession>(), loggerFactory);
         DebugRegistry = debugRegistry;
+        Session = session;
+        LoginHandlers = loginHandlers;
+        FieldHandlers = fieldHandlers;
+        Migration = migration;
+        LoginHost = config["LOGIN_HOST"] ?? "127.0.0.1";
+        LoginPort = int.TryParse(config["LOGIN_PORT"], out var port) ? port : 8484;
 
         // v95 native resolution is 800×600; larger windows leave black borders
         // around the title map (which is laid out for 800×600).
@@ -212,6 +245,52 @@ public sealed class MapleClaudeGame : Game
     [System.Runtime.InteropServices.DllImport("imm32.dll")]
     private static extern bool ImmReleaseContext(IntPtr hWnd, IntPtr hIMC);
 
+    [System.Runtime.InteropServices.DllImport("imm32.dll")]
+    private static extern IntPtr ImmGetDefaultIMEWnd(IntPtr hWnd);
+
+    [System.Runtime.InteropServices.DllImport("user32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+    private static extern IntPtr SendMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
+
+    private const uint WmImeControl = 0x0283;
+    private const int ImcGetConversionMode = 0x0001;
+    private const int ImcSetConversionMode = 0x0002;
+    private const int ImeCmodeNative = 0x0001;        // Korean Hangul / Japanese Hiragana / etc.
+
+    /// <summary>
+    /// Toggle the active Korean IME between Hangul and English (Yeong) mode.
+    /// SDL2 swallows the raw Right Alt key before the OS IME sees it, so we
+    /// drive the toggle directly: find the IME's own message-only window via
+    /// <c>ImmGetDefaultIMEWnd</c> and send it <c>WM_IME_CONTROL</c> with
+    /// <c>IMC_GETCONVERSIONMODE</c> to read the current state, then
+    /// <c>IMC_SETCONVERSIONMODE</c> with the <c>IME_CMODE_NATIVE</c> bit
+    /// flipped. This is the documented inter-process IME control path and
+    /// updates the taskbar 한 ↔ A indicator the same way the hardware Hangul
+    /// key would.
+    /// </summary>
+    private void ToggleNativeIme()
+    {
+        try
+        {
+            var hwnd = Window.Handle;
+            var imeHwnd = ImmGetDefaultIMEWnd(hwnd);
+            if (imeHwnd == IntPtr.Zero)
+            {
+                _logger.LogWarning("ImmGetDefaultIMEWnd returned NULL — no IME bound to game window");
+                return;
+            }
+            var current = SendMessage(imeHwnd, WmImeControl, (IntPtr)ImcGetConversionMode, IntPtr.Zero).ToInt32();
+            var newMode = (current & ImeCmodeNative) != 0
+                ? current & ~ImeCmodeNative
+                : current | ImeCmodeNative;
+            SendMessage(imeHwnd, WmImeControl, (IntPtr)ImcSetConversionMode, (IntPtr)newMode);
+            _logger.LogDebug("IME conversion mode toggled: 0x{Old:X} → 0x{New:X}", current, newMode);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "ToggleNativeIme via WM_IME_CONTROL failed");
+        }
+    }
+
     private void TrySetWindowIcon()
     {
         try
@@ -254,6 +333,7 @@ public sealed class MapleClaudeGame : Game
         _soundWz?.Dispose();
         _charWz?.Dispose();
         _npcWz?.Dispose();
+        _itemWz?.Dispose();
         _spriteBatch?.Dispose();
         _white?.Dispose();
         _windowIcon?.Dispose();
@@ -264,6 +344,9 @@ public sealed class MapleClaudeGame : Game
 
     protected override void Update(GameTime gameTime)
     {
+        // Drain inbound network packets first so handlers see live state in this tick.
+        Session.DrainInbound();
+
         var keyboard = Keyboard.GetState();
         if (keyboard.IsKeyDown(Keys.Escape))
         {
@@ -297,6 +380,12 @@ public sealed class MapleClaudeGame : Game
         {
             if (!_prevKeyboard.IsKeyDown(k))
             {
+                // Right Alt = Korean IME Han↔Yeong toggle. SDL2 swallows it,
+                // so we manually flip the IME conversion mode.
+                if (k == Keys.RightAlt)
+                {
+                    ToggleNativeIme();
+                }
                 StageDirector.OnKeyPress(k);
             }
         }
@@ -416,6 +505,7 @@ public sealed class MapleClaudeGame : Game
         _soundWz = TryOpen(Path.Combine(_wzDir, "Sound.wz"));
         _charWz = TryOpen(Path.Combine(_wzDir, "Character.wz"));
         _npcWz = TryOpen(Path.Combine(_wzDir, "Npc.wz"));
+        _itemWz = TryOpen(Path.Combine(_wzDir, "Item.wz"));
     }
 
     private WzPackage? TryOpen(string path)

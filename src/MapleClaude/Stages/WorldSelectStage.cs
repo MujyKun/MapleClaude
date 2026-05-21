@@ -1,9 +1,9 @@
 using MapleClaude.App;
 using MapleClaude.Debug;
+using MapleClaude.Domain;
 using MapleClaude.Map;
-using MapleClaude.Net;
 using MapleClaude.Net.Handlers;
-using MapleClaude.Net.Senders;
+using MapleClaude.Net.Packet;
 using MapleClaude.Render;
 using MapleClaude.Wz;
 using Microsoft.Extensions.Logging;
@@ -42,6 +42,9 @@ public sealed class WorldSelectStage : Stage
     private bool _channelAssetsLoaded;
     private int _selectedWorldId;
     private int _selectedChannelId;
+
+    // ---- Network ----
+    private string _statusLabel = "Loading worlds...";
 
     // ---- Camera + scroll ----
     private Vector2 _cameraOffset;
@@ -160,6 +163,15 @@ public sealed class WorldSelectStage : Stage
 
         ApplyLayout();
         RegisterDebugItems();
+
+        Game.LoginHandlers.OnWorldListComplete += OnWorldListComplete;
+        Game.LoginHandlers.OnSelectWorldResult += OnSelectWorldResult;
+        Game.Session.Disconnected += OnDisconnected;
+
+        // Send WorldInfoRequest(4) — server replies with one WorldInformation per world.
+        var p = OutPacket.Of(InHeader.WorldInfoRequest);
+        Game.Session.Send(p);
+
         _logger.LogInformation(
             "WorldSelectStage entered — scrolling from {Start} to SP + {Offset}",
             _cameraStart, _cameraOffset);
@@ -168,9 +180,52 @@ public sealed class WorldSelectStage : Stage
     public override void OnExit()
     {
         UnregisterDebugItems();
+        Game.LoginHandlers.OnWorldListComplete -= OnWorldListComplete;
+        Game.LoginHandlers.OnSelectWorldResult -= OnSelectWorldResult;
+        Game.Session.Disconnected -= OnDisconnected;
         _loader?.Dispose();
         _loader = null;
         base.OnExit();
+    }
+
+    private void OnWorldListComplete(List<WorldInfo> worlds)
+    {
+        _logger.LogInformation("World list ready: {N} worlds", worlds.Count);
+        _statusLabel = worlds.Count == 0 ? "No worlds available." : string.Empty;
+        // The v95 asset set only ships BtWorld/0 + BtWorld/e (a disabled stub),
+        // and we render BtWorld/0 for the first available world. We don't try
+        // to render N world buttons dynamically — the GMS v95 client did the
+        // same (one custom world button per supported world, with disabled
+        // placeholders for the rest).
+        if (worlds.Count > 0 && _btStart != null)
+        {
+            _btStart.Enabled = false;  // still need to pick channel first
+        }
+    }
+
+    private void OnSelectWorldResult(SelectWorldResultArgs args)
+    {
+        if (!args.Success)
+        {
+            _statusLabel = $"World select failed (code {args.ResultCode}).";
+            return;
+        }
+        _statusLabel = $"Character list: {args.Characters.Count} characters.";
+        // Hand the live character list off to the session so CharSelectStage
+        // can pull it from there (it already lives on session.Characters).
+        Game.Session.Characters.Clear();
+        Game.Session.Characters.AddRange(args.Characters);
+        Game.StageDirector.Replace(new CharSelectStage(
+            _loggerFactory.CreateLogger<CharSelectStage>(),
+            _loggerFactory, _ui, _map, _sound,
+            _selectedWorldId, _selectedChannelId,
+            _scene?.Camera ?? Vector2.Zero, _cameraOffset));
+    }
+
+    private void OnDisconnected(Exception? cause)
+    {
+        _ = cause;
+        _statusLabel = "Disconnected.";
     }
 
     public override void Update(GameTime gameTime)
@@ -180,7 +235,6 @@ public sealed class WorldSelectStage : Stage
             return;
         }
         var dt = (float)gameTime.ElapsedGameTime.TotalSeconds;
-        Game.Session.DrainQueue();
         _scrollT = Math.Min(1f, _scrollT + dt / ScrollDuration);
         var sp = _scene.StartPoint ?? Vector2.Zero;
         var target = sp + _cameraOffset;
@@ -213,6 +267,14 @@ public sealed class WorldSelectStage : Stage
         else
         {
             DrawChannelGrid(spriteBatch);
+        }
+
+        if (!string.IsNullOrEmpty(_statusLabel) && Game.Font is not null)
+        {
+            var font = Game.Font;
+            var size = font.Measure(_statusLabel);
+            font.Draw(spriteBatch, _statusLabel,
+                new Vector2(w / 2f - size.X / 2f, h - 30), Color.White);
         }
     }
 
@@ -285,7 +347,33 @@ public sealed class WorldSelectStage : Stage
         }
         else
         {
-            _btGoWorld?.HandleMouseButton(x, y, down);
+            if (_btGoWorld?.HandleMouseButton(x, y, down) == true)
+            {
+                return;
+            }
+            // Channel cells (clickable; enabled 0..4 per asset manifest).
+            if (down)
+            {
+                for (var i = 0; i < 5; i++)
+                {
+                    var sprite = _channelSprites[i];
+                    if (sprite is null)
+                    {
+                        continue;
+                    }
+                    var col = i % GridCols;
+                    var row = i / GridCols;
+                    var pos = _channelGridBase + new Vector2(col * _channelGridStep.X, row * _channelGridStep.Y);
+                    var w = sprite.Width;
+                    var h = sprite.Height;
+                    var rect = new Rectangle((int)pos.X, (int)pos.Y, w, h);
+                    if (rect.Contains(x, y))
+                    {
+                        OnChannelPicked((byte)i);
+                        return;
+                    }
+                }
+            }
         }
     }
 
@@ -323,6 +411,21 @@ public sealed class WorldSelectStage : Stage
         _subScreen = SubScreen.ChannelGrid;
     }
 
+    private void OnChannelPicked(int channelId)
+    {
+        _selectedChannelId = channelId;
+        _statusLabel = $"Joining world {_selectedWorldId} ch {channelId}...";
+        // SelectWorld(5): byte gameStartMode=2, byte worldId, byte channelId, int unk=0.
+        var p = OutPacket.Of(InHeader.SelectWorld);
+        p.WriteByte(2);
+        p.WriteByte((byte)_selectedWorldId);
+        p.WriteByte((byte)channelId);
+        p.WriteInt(0);
+        Game.Session.Send(p);
+        Game.Session.Account.SelectedWorldId = (byte)_selectedWorldId;
+        Game.Session.Account.SelectedChannelId = (byte)channelId;
+    }
+
     private void LoadChannelAssets()
     {
         _chBackgrn = LoadCanvas("Login.img/WorldSelect/chBackgrn");
@@ -336,42 +439,8 @@ public sealed class WorldSelectStage : Stage
             var state = i < 5 ? "normal" : "disabled";
             _channelSprites[i] = LoadCanvas($"Login.img/WorldSelect/channel/{i}/{state}");
         }
-        _btGoWorld = MakeButton("Login.img/WorldSelect/BtGoworld", () =>
-        {
-            _logger.LogInformation("BtGoworld clicked — SelectWorld world={W} ch={C}",
-                _selectedWorldId, _selectedChannelId);
-            // Send SelectWorld to Kinoko; transition on SelectWorldResult
-            if (Game.Session.IsConnected)
-            {
-                // Re-register SelectWorldResult handler for this selection
-                Game.Session.RegisterHandler(InHeader.SelectWorldResult, pkt =>
-                {
-                    var result = pkt.DecodeByte();
-                    if (result != 0) return;
-                    var charCount = pkt.DecodeByte();
-                    var chars = new List<CharSelectStage.CharInfo>(charCount);
-                    for (var i = 0; i < charCount; i++)
-                        chars.Add(LoginPacketHandler.ReadCharInfo(pkt));
-                    var stage = new CharSelectStage(
-                        _loggerFactory.CreateLogger<CharSelectStage>(),
-                        _loggerFactory, _ui, _map, _sound,
-                        _selectedWorldId, _selectedChannelId,
-                        _scene?.Camera ?? Vector2.Zero, _cameraOffset);
-                    Game.StageDirector.Replace(stage);
-                    stage.LoadChars(chars);
-                });
-                Game.Session.Send(LoginSender.SelectWorld(_selectedWorldId, _selectedChannelId));
-            }
-            else
-            {
-                // No connection — UI-only mode
-                Game.StageDirector.Replace(new CharSelectStage(
-                    _loggerFactory.CreateLogger<CharSelectStage>(),
-                    _loggerFactory, _ui, _map, _sound,
-                    _selectedWorldId, _selectedChannelId,
-                    _scene?.Camera ?? Vector2.Zero, _cameraOffset));
-            }
-        });
+        _btGoWorld = MakeButton("Login.img/WorldSelect/BtGoworld",
+            () => OnChannelPicked(_selectedChannelId));
         ApplyChannelLayout();
         _logger.LogInformation("ChannelGrid assets loaded");
     }

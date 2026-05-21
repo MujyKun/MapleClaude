@@ -18,10 +18,14 @@
     <NoWarn>$(NoWarn);CS1591;CA1305;CA1848;CA1873;CA2007</NoWarn>
 
     <!-- Build "platform" is Any CPU (the standard .NET pattern Visual Studio expects).
-         The actual CPU target is x64 via PlatformTarget. RuntimeIdentifier wins x64
-         for native deps (MonoGame.Framework.WindowsDX). -->
+         The actual CPU target is x64 via PlatformTarget. RuntimeIdentifiers is set
+         only on the exe project (MapleClaude.csproj) — leaving it here causes VS
+         2026 to auto-select win-x64 as the singular RuntimeIdentifier for every
+         OutputType=WinExe project, which then makes it look for project-ref'd
+         assemblies at win-x64-suffixed obj/ paths that the referenced library
+         projects (no RID set) don't produce. CLI MSBuild tolerates the mismatch;
+         VS2026 doesn't. -->
     <PlatformTarget>x64</PlatformTarget>
-    <RuntimeIdentifiers>win-x64</RuntimeIdentifiers>
 
     <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
     <CentralPackageTransitivePinningEnabled>true</CentralPackageTransitivePinningEnabled>

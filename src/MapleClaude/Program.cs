@@ -1,5 +1,7 @@
 using System.Runtime.InteropServices;
 using MapleClaude.Debug;
+using MapleClaude.Net.Handlers;
+using MapleClaude.Net.Session;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -15,10 +17,11 @@ namespace MapleClaude;
 internal sealed class Bootstrap;
 
 /// <summary>
-/// Phase 1 entry point. Boots the generic host, wires Serilog (Console +
+/// MapleClaude entry point. Boots the generic host, wires Serilog (Console +
 /// rolling file + Debug sinks + optional debug-window sink), reads
-/// <c>MAPLECLAUDE_*</c> config from the environment, optionally launches the
-/// WinForms debug window, then hands control to the MonoGame
+/// <c>MAPLECLAUDE_*</c> config from the environment, registers the network
+/// session + packet router + handler set as DI singletons, optionally
+/// launches the WinForms debug window, then hands control to the MonoGame
 /// <see cref="MapleClaudeGame"/> loop. ESC exits.
 /// </summary>
 public static class Program
@@ -35,7 +38,6 @@ public static class Program
         Directory.CreateDirectory(logDir);
         var logPath = Path.Combine(logDir, "mapleclaude-.log");
 
-        // Shared debug infrastructure (only used if MAPLECLAUDE_DEBUG=1).
         var debugRegistry = new DebugRegistry();
         var debugLogSink = new DebugLogSink();
 
@@ -60,16 +62,33 @@ public static class Program
             builder.Logging.ClearProviders();
             builder.Services.AddSerilog();
             builder.Services.AddSingleton(debugRegistry);
+
+            // Networking stack — single shared session, router, coordinator.
+            builder.Services.AddSingleton<PacketRouter>();
+            builder.Services.AddSingleton<ClientSession>();
+            builder.Services.AddSingleton<MigrationCoordinator>();
+            builder.Services.AddSingleton<LoginHandlers>();
+            builder.Services.AddSingleton<FieldHandlers>();
+
             builder.Services.AddSingleton<MapleClaudeGame>();
 
             using var host = builder.Build();
 
             var logger = host.Services.GetRequiredService<ILogger<Bootstrap>>();
             logger.LogInformation(
-                "MapleClaude {Phase} starting — log dir {LogDir} debug={Debug}",
-                "phase-1", logDir, DebugLauncher.IsEnabled);
+                "MapleClaude starting — log dir {LogDir} debug={Debug}",
+                logDir, DebugLauncher.IsEnabled);
 
-            // Optional debug window — only when MAPLECLAUDE_DEBUG=1.
+            // Wire handlers into the router up front so the first packets after
+            // ConnectAsync find a registered handler.
+            var router = host.Services.GetRequiredService<PacketRouter>();
+            host.Services.GetRequiredService<LoginHandlers>().Register(router);
+            host.Services.GetRequiredService<FieldHandlers>().Register(router);
+
+            // Generate a stable 16-byte machine id for CheckPassword + MigrateIn.
+            var session = host.Services.GetRequiredService<ClientSession>();
+            session.MachineId = MachineIdProvider.Generate();
+
             DebugLauncher.Launch(debugRegistry, debugLogSink);
 
             using var game = host.Services.GetRequiredService<MapleClaudeGame>();
