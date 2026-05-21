@@ -29,6 +29,7 @@ public sealed class CharLook
     private int _frame;
     private float _frameTimer;
     private bool _facingLeft;
+    public bool FacingLeft => _facingLeft;
 
     // Physics
     public Vector2 Position { get; set; }

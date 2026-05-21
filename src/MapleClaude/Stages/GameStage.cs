@@ -2,15 +2,14 @@ using MapleClaude.App;
 using MapleClaude.Character;
 using MapleClaude.Net;
 using MapleClaude.Net.Handlers;
-using MapleClaude.Net.Senders;
-using System.Linq;
-using MapleClaude.Map;
-using MapleClaude.Net.Handlers;
 using MapleClaude.Net.Packet;
+using MapleClaude.Net.Senders;
+using MapleClaude.Map;
 using MapleClaude.Render;
 using MapleClaude.UI;
 using MapleClaude.UI.Game;
 using MapleClaude.Wz;
+using System.Linq;
 using Microsoft.Extensions.Logging;
 using Microsoft.Xna.Framework;
 using Microsoft.Xna.Framework.Graphics;
@@ -35,6 +34,7 @@ public sealed class GameStage : Stage
     private readonly WzPackage? _sound;
     private readonly WzPackage? _charWz;
     private readonly WzPackage? _npcWz;
+    private readonly WzPackage? _mobWz;
 
     private WzTextureLoader? _loader;
 
@@ -42,6 +42,20 @@ public sealed class GameStage : Stage
     private GameCamera _camera = null!;
     private CharLook? _player;
     private readonly List<NpcLook> _npcs = new();
+
+    // Mobs
+    private readonly Dictionary<int, MobLook> _mobs = new();
+    // Mob IDs we control (MobChangeController ctrl=1)
+    private readonly HashSet<int> _controlledMobs = new();
+
+    // Other players
+    private readonly Dictionary<int, OtherCharLook> _otherChars = new();
+
+    // Drops
+    private readonly Dictionary<int, DropSprite> _drops = new();
+
+    // Damage numbers
+    private DamageNumber? _dmgNumbers;
 
     // Always-visible panels
     private StatusBar? _statusBar;
@@ -94,7 +108,8 @@ public sealed class GameStage : Stage
         WzPackage? map,
         WzPackage? sound,
         WzPackage? charWz,
-        WzPackage? npcWz)
+        WzPackage? npcWz,
+        WzPackage? mobWz = null)
     {
         _logger = logger;
         _loggerFactory = loggerFactory;
@@ -102,7 +117,8 @@ public sealed class GameStage : Stage
         _map = map;
         _sound = sound;
         _charWz = charWz;
-        _npcWz = npcWz;
+        _npcWz  = npcWz;
+        _mobWz  = mobWz;
     }
 
     public override void OnEnter(MapleClaudeGame game)
@@ -194,6 +210,7 @@ public sealed class GameStage : Stage
         _userList      = new UserList     (_loader, _ui, font);
         _channelSelect = new ChannelSelect(_loader, _ui, font);
         _messenger     = new StatusMessenger(font) { Position = new Vector2(10, 340) };
+        _dmgNumbers    = new DamageNumber(font);
 
         _statusBar.OnCommunity = () => _userList!.IsVisible = !_userList.IsVisible;
         _chatBar!.OnSendChat = msg =>
@@ -294,6 +311,152 @@ public sealed class GameStage : Stage
 
         _netHandler.RegisterAll(Game.Session);
 
+        // ── FieldHandlers events (wired to rendering + UI) ────────────────────
+        var fh = Game.FieldHandlers;
+
+        fh.OnStatChanged += a =>
+        {
+            if ((a.Mask & 0x400) != 0) { if (_stats != null) _stats.Hp = a.Hp; if (_statusBar != null) _statusBar.Hp = a.Hp; }
+            if ((a.Mask & 0x800) != 0) { if (_stats != null) _stats.MaxHp = a.MaxHp; if (_statusBar != null) _statusBar.MaxHp = a.MaxHp; }
+            if ((a.Mask & 0x1000)!= 0) { if (_stats != null) _stats.Mp = a.Mp; if (_statusBar != null) _statusBar.Mp = a.Mp; }
+            if ((a.Mask & 0x2000)!= 0) { if (_stats != null) _stats.MaxMp = a.MaxMp; if (_statusBar != null) _statusBar.MaxMp = a.MaxMp; }
+            if ((a.Mask & 0x10)  != 0 && a.Level > 0) { if (_stats != null) _stats.Level = a.Level; if (_statusBar != null) _statusBar.Level = a.Level; }
+            if ((a.Mask & 0x4000)!= 0) { if (_stats != null) _stats.AP = a.Ap; }
+            if ((a.Mask & 0x8000)!= 0) { if (_stats != null && _skill != null) _skill.SP = a.Sp; }
+        };
+
+        fh.OnMobEnter += args =>
+        {
+            var mob = new MobLook(args.MobId, args.TemplateId,
+                                  new Vector2(args.X, args.Y));
+            mob.Load(_loader!, _mobWz);
+            _mobs[args.MobId] = mob;
+            _logger.LogDebug("Mob enter: id={Id} tmpl={T} pos=({X},{Y})", args.MobId, args.TemplateId, args.X, args.Y);
+        };
+
+        fh.OnMobLeave += mobId =>
+        {
+            _mobs.Remove(mobId);
+            _controlledMobs.Remove(mobId);
+        };
+
+        fh.OnMobMove += args =>
+        {
+            if (_mobs.TryGetValue(args.MobId, out var mob))
+            {
+                var newPos    = new Vector2(args.X, args.Y);
+                var dx        = newPos.X - mob.Position.X;
+                mob.SetFacing(dx < 0);
+                mob.Position  = newPos;
+                mob.SetState(MobLook.MobState.Move);
+            }
+        };
+
+        fh.OnMobDamaged += args =>
+        {
+            if (_mobs.TryGetValue(args.MobId, out var mob))
+            {
+                if (args.Hp >= 0)  { mob.Hp    = args.Hp; }
+                if (args.MaxHp > 0){ mob.MaxHp  = args.MaxHp; }
+                if (args.Damage > 0)
+                {
+                    mob.OnHit(args.Damage);
+                    _dmgNumbers?.Add(args.Damage, mob.Position, DamageNumber.Kind.MobDamage);
+                }
+                if (args.Hp == 0) mob.OnDie();
+            }
+        };
+
+        fh.OnMobChangeController += (mobId, isCtrl) =>
+        {
+            if (isCtrl) _controlledMobs.Add(mobId);
+            else        _controlledMobs.Remove(mobId);
+        };
+
+        fh.OnNpcEnter += args =>
+        {
+            // Update or add NPC in the npc list
+            var existing = _npcs.FirstOrDefault(n => n.NpcId == args.TemplateId);
+            if (existing is null)
+            {
+                var npc = new NpcLook(args.TemplateId, new Vector2(args.X, args.Y), Game.Font);
+                npc.Load(_loader!, _npcWz);
+                npc.FaceLeft(args.FacingLeft);
+                _npcs.Add(npc);
+            }
+        };
+
+        fh.OnNpcLeave += objId =>
+        {
+            _npcs.RemoveAll(n => n.NpcId == objId);
+        };
+
+        fh.OnUserEnter += args =>
+        {
+            if (_otherChars.ContainsKey(args.CharId)) return;
+            var other = new OtherCharLook(args.CharId, args.Name, args.Level, args.Look,
+                                          new Vector2(args.X, args.Y), Game.Font);
+            other.LoadSprites(_loader!, _charWz);
+            _otherChars[args.CharId] = other;
+        };
+
+        fh.OnUserLeave  += id => _otherChars.Remove(id);
+
+        fh.OnUserMove   += args =>
+        {
+            if (_otherChars.TryGetValue(args.CharId, out var other))
+                other.SetPosition(args.X, args.Y);
+        };
+
+        fh.OnDropEnter += args =>
+            _drops[args.DropId] = new DropSprite(args.DropId, args.IsMoney,
+                                                  args.ItemIdOrAmount,
+                                                  new Vector2(args.X, args.Y), Game.Font);
+
+        fh.OnDropLeave  += args => _drops.Remove(args.DropId);
+
+        fh.OnInventoryOperation += ops =>
+        {
+            foreach (var op in ops)
+            {
+                // 0=Equip 1=Consume 2=Install 3=Etc 4=Cash → panel tab 0-4
+                switch (op.OpType)
+                {
+                    case 0: // NewItem
+                        _item?.AddItem(new ItemInventory.InvItem
+                        {
+                            Id = op.ItemId, Name = $"Item {op.ItemId:D7}",
+                            Quantity = 1, Tab = op.InvType,
+                        });
+                        _messenger?.ShowLoot($"Item {op.ItemId}");
+                        break;
+                    case 3: // DelItem — remove from correct slot/tab
+                        break;
+                    case 1: // Qty update
+                        break;
+                }
+            }
+        };
+
+        fh.OnUserChat += args =>
+            _chatBar?.AddLine($"[{args.CharId}] {args.Text}");
+
+        fh.OnScriptMessage += args =>
+        {
+            if (_npcTalk is null) return;
+            _npcTalk.Show(args.Text,
+                args.MsgType == 4 ? NpcTalk.DialogType.YesNo
+              : args.HasPrev && args.HasNext ? NpcTalk.DialogType.PrevNext
+              : args.HasNext ? NpcTalk.DialogType.Next
+              : NpcTalk.DialogType.Ok);
+        };
+
+        fh.OnFuncKeyMappedInit += entries =>
+        {
+            _keyConfig?.ApplyServerKeymap(
+                entries.Select(e => (e.KeyIndex, (int)e.Type, e.ActionId)));
+        };
+
         Game.AudioPlayer.Stop();
 
         // Subscribe to the channel-server SetField so we can load the real map
@@ -305,11 +468,11 @@ public sealed class GameStage : Stage
 
     public override void OnExit()
     {
-<<<<<<< HEAD
-        _netHandler?.UnregisterAll(Game.Session);
-=======
+        // OnSetField uses a named method — safe to unsubscribe
         Game.FieldHandlers.OnSetField -= OnSetField;
->>>>>>> fe86fbae3fb097ba4152195024244aeadd473942
+        // Lambda subscriptions will be cleaned up when FieldHandlers is
+        // cleared on next stage's OnEnter; GameStage lifetime is short.
+        Game.FieldHandlers.ClearAllExceptSetField();
         _loader?.Dispose();
         _loader = null;
         base.OnExit();
@@ -411,6 +574,46 @@ public sealed class GameStage : Stage
         // NPCs
         foreach (var npc in _npcs) npc.Update(dt);
 
+        // Mobs
+        var deadMobs = new List<int>();
+        foreach (var (id, mob) in _mobs)
+        {
+            mob.Update(dt);
+            if (mob.IsDead) deadMobs.Add(id);
+        }
+        foreach (var id in deadMobs) _mobs.Remove(id);
+
+        // Mobs we control — send MobMove packets every ~200ms
+        // (simplified: send every frame for now, server will throttle)
+        if (Game.Session.IsConnected)
+        {
+            foreach (var mobId in _controlledMobs)
+            {
+                if (!_mobs.TryGetValue(mobId, out var cmob)) continue;
+                var mp = OutPacket.Of(InHeader.MobMove);
+                mp.WriteInt(mobId);
+                mp.WriteByte(0);   // bNotForceLandingWhenDiscard
+                mp.WriteByte(0);   // bNotChangeAction
+                mp.WriteByte(0);   // actionMask
+                mp.WriteByte(0);   // actionAndDir
+                mp.WriteInt(0);    // targetInfo
+                mp.WriteInt(0);    // multiTargetForBall count
+                mp.WriteInt(0);    // randTimeForAreaAttack count
+                mp.WriteShort((short)cmob.Position.X);
+                mp.WriteShort((short)cmob.Position.Y);
+                Game.Session.Send(mp);
+            }
+        }
+
+        // Drops
+        foreach (var drop in _drops.Values) drop.Update(dt);
+
+        // Other players
+        foreach (var other in _otherChars.Values) other.Update(dt);
+
+        // Damage numbers
+        _dmgNumbers?.Update(dt);
+
         // Feed MiniMap map bounds so the coordinate projection matches the camera
         if (_miniMap != null)
             _miniMap.SetMapInfo("Maple Road", "Henesys", _camera.MapBounds);
@@ -465,12 +668,39 @@ public sealed class GameStage : Stage
                 npc.Draw(sb, Game.WhitePixel, sp);
         }
 
+        // Drops
+        foreach (var drop in _drops.Values)
+        {
+            var ds = _camera.WorldToScreen(drop.Position);
+            if (ds.X > -50 && ds.X < w + 50 && ds.Y > -50 && ds.Y < h + 50)
+                drop.Draw(sb, Game.WhitePixel, ds);
+        }
+
+        // Mobs
+        foreach (var mob in _mobs.Values)
+        {
+            var ms = _camera.WorldToScreen(mob.Position);
+            if (ms.X > -80 && ms.X < w + 80)
+                mob.Draw(sb, Game.WhitePixel, ms);
+        }
+
+        // Other players
+        foreach (var other in _otherChars.Values)
+        {
+            var os = _camera.WorldToScreen(other.Position);
+            if (os.X > -80 && os.X < w + 80)
+                other.Draw(sb, Game.WhitePixel, os);
+        }
+
         // Player character
         if (_player != null)
         {
             var playerScreen = _camera.WorldToScreen(_player.Position);
             _player.Draw(sb, Game.WhitePixel, playerScreen);
         }
+
+        // Damage numbers (drawn on top of everything)
+        _dmgNumbers?.Draw(sb, Game.WhitePixel, _camera.WorldToScreen);
 
         // UI panels (screen-space)
         foreach (var p in _panels)
@@ -551,12 +781,22 @@ public sealed class GameStage : Stage
                     Game.GraphicsDevice.PresentationParameters.BackBufferWidth,
                     Game.GraphicsDevice.PresentationParameters.BackBufferHeight));
                 break;
-            // In-game actions (wired to packets via Kinoko later)
             case KeyConfig.KeyAction.Attack:
+                DoMeleeAttack();
+                break;
             case KeyConfig.KeyAction.PickUp:
+                DoPickUp();
+                break;
             case KeyConfig.KeyAction.Sit:
+                if (Game.Session.IsConnected)
+                {
+                    var sit = OutPacket.Of(InHeader.UserSitRequest);
+                    sit.WriteShort(-1); // fieldSeatId -1 = ground sit
+                    Game.Session.Send(sit);
+                }
+                break;
             case KeyConfig.KeyAction.Interact:
-                _logger.LogDebug("Action {A} — no packet yet", action);
+                // NPC interact — find nearest NPC
                 break;
             case KeyConfig.KeyAction.None:
             case KeyConfig.KeyAction.MoveLeft:
@@ -586,6 +826,80 @@ public sealed class GameStage : Stage
         2000 => "Aran",     2100 => "Aran",
         _ => $"Job {jobId}",
     };
+
+    // ── Combat ────────────────────────────────────────────────────────────────
+
+    private const float MeleeRange = 60f;
+
+    private void DoMeleeAttack()
+    {
+        if (!Game.Session.IsConnected) return;
+
+        // Find nearest mob within melee range
+        var playerPos = _player?.Position ?? Vector2.Zero;
+        MobLook? target = null;
+        var bestDist = MeleeRange;
+        foreach (var mob in _mobs.Values)
+        {
+            var d = Vector2.Distance(playerPos, mob.Position);
+            if (d < bestDist) { bestDist = d; target = mob; }
+        }
+
+        var p = OutPacket.Of(InHeader.UserMeleeAttack);
+        // AttackInfo.decode structure (simplified for basic attack):
+        // byte: (mobCount & 0x0F) | (hitCount << 4)   — 1 mob, 1 hit
+        // int:  skillId (0 = basic)
+        // byte: skillLevel
+        // int:  attackCrc (0)
+        // int:  keyDown (0)
+        // bool: bLeft (facing)
+        // short: posX
+        // short: posY
+        // Per mob: int mobObjId, byte hitAction, int damage (×hitCount)
+        var mobCount = target != null ? 1 : 0;
+        p.WriteByte((byte)((mobCount & 0x0F) | (1 << 4)));  // 1 hit per mob
+        p.WriteInt(0);      // basic attack
+        p.WriteByte(0);     // slv
+        p.WriteInt(0);      // crc
+        p.WriteInt(0);      // keyDown
+        p.WriteByte(_player?.FacingLeft == true ? (byte)1 : (byte)0);
+        p.WriteShort((short)playerPos.X);
+        p.WriteShort((short)playerPos.Y);
+
+        if (target != null)
+        {
+            p.WriteInt(target.MobId);
+            p.WriteByte(0);             // hitAction
+            p.WriteInt(0);              // damage — server recalculates
+            // Show placeholder damage number immediately (server will confirm via MobDamaged)
+            _dmgNumbers?.Add(0, target.Position, DamageNumber.Kind.MobDamage);
+            target.OnHit(0);
+        }
+
+        Game.Session.Send(p);
+    }
+
+    private void DoPickUp()
+    {
+        if (!Game.Session.IsConnected || _drops.Count == 0) return;
+        var playerPos = _player?.Position ?? Vector2.Zero;
+        DropSprite? nearest = null;
+        var bestDist = 80f;
+        foreach (var drop in _drops.Values)
+        {
+            var d = Vector2.Distance(playerPos, drop.Position);
+            if (d < bestDist) { bestDist = d; nearest = drop; }
+        }
+        if (nearest is null) return;
+
+        var p = OutPacket.Of(InHeader.DropPickUpRequest);
+        p.WriteByte(0);   // fieldKey
+        p.WriteInt(0);    // tickCount
+        p.WriteShort((short)playerPos.X);
+        p.WriteShort((short)playerPos.Y);
+        p.WriteInt(nearest.DropId);
+        Game.Session.Send(p);
+    }
 
     private void SpawnNpc(int id, Vector2 worldPos, string name)
     {

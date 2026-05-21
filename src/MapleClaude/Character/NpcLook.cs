@@ -15,6 +15,7 @@ public sealed class NpcLook
 {
     private readonly int _npcId;
     private readonly BuiltInFont? _font;
+    public int NpcId => _npcId;
 
     // Animations indexed by state name → ordered frames
     private readonly Dictionary<string, List<(WzSprite sprite, int delayMs)>> _anims = new();

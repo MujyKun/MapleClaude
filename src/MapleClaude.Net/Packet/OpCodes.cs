@@ -79,6 +79,7 @@ public enum InHeader : short
     Whisper = 141,
     PartyRequest = 145,
     MobMove = 227,
+    MobApplyCtrl = 228,
     NpcMove = 241,
     DropPickUpRequest = 246,
 }
@@ -129,7 +130,10 @@ public enum OutHeader : short
     UserMove = 210,
     MobEnterField = 284,
     MobLeaveField = 285,
+    MobChangeController = 286,
     MobMove = 287,
+    MobCtrlAck = 288,
+    MobDamaged = 294,
     NpcEnterField = 311,
     NpcLeaveField = 312,
     NpcMove = 314,
