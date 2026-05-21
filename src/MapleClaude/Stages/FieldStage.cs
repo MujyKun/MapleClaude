@@ -6,6 +6,7 @@ using MapleClaude.Net.Handlers;
 using MapleClaude.Net.Packet;
 using MapleClaude.Net.Session;
 using MapleClaude.Render;
+using MapleClaude.UI.Game;
 using MapleClaude.Wz;
 using Microsoft.Extensions.Logging;
 using Microsoft.Xna.Framework;
@@ -35,12 +36,17 @@ public sealed class FieldStage : Stage
 
     private WzTextureLoader? _loader;
     private FieldScene? _field;
+    private KeyboardState _prevKeyboard;
     private CharacterRenderer? _avatar;
     private AvatarLook? _look;
     private CharacterStat? _stat;
     private string _statusLabel = "Waiting for SetField from channel...";
     private byte _fieldKey;
     private PlayerController? _player;
+
+    // KeyConfig owns the live bindings — created in OnEnter.
+    // F12 always opens it regardless of what Jump/MoveLeft etc. are bound to.
+    private KeyConfig? _keyConfig;
 
     public FieldStage(
         ILogger<FieldStage> logger,
@@ -65,6 +71,11 @@ public sealed class FieldStage : Stage
         _avatar = new CharacterRenderer(
             _loggerFactory.CreateLogger<CharacterRenderer>(),
             game.CharacterWz, game.ItemWz, _loader);
+
+        // KeyConfig — UI panel that also owns the binding map.
+        // Loaded without WZ buttons (null ui pkg) so it falls back to drawn keys.
+        _keyConfig = new KeyConfig(_loader, game.UiWz, game.Font);
+
         Game.FieldHandlers.OnSetField += OnSetField;
         _logger.LogInformation("FieldStage mounted for charId={Cid} — awaiting SetField", _characterId);
     }
@@ -114,17 +125,27 @@ public sealed class FieldStage : Stage
         {
             return;
         }
-        var kb = Keyboard.GetState();
+        var kb    = Keyboard.GetState();
+        var kc    = _keyConfig!;
+
+        // F12 = meta key to open KeyConfig regardless of bindings
+        if (kb.IsKeyDown(Keys.F12) && !_prevKeyboard.IsKeyDown(Keys.F12))
+            kc.IsVisible = !kc.IsVisible;
+
+        // All movement driven by KeyConfig bindings — respects user rebinds
         var input = new PlayerInput
         {
-            Left = kb.IsKeyDown(Keys.Left),
-            Right = kb.IsKeyDown(Keys.Right),
-            Up = kb.IsKeyDown(Keys.Up),
-            Down = kb.IsKeyDown(Keys.Down),
-            JumpPressed = kb.IsKeyDown(Keys.LeftAlt) || kb.IsKeyDown(Keys.RightAlt),
+            Left        = kc.IsActionDown(kb, KeyConfig.KeyAction.MoveLeft),
+            Right       = kc.IsActionDown(kb, KeyConfig.KeyAction.MoveRight),
+            JumpPressed = kc.IsActionDown(kb, KeyConfig.KeyAction.Jump),
         };
-        _player.Update(input, (float)gameTime.ElapsedGameTime.TotalSeconds);
+
+        var dt = (float)gameTime.ElapsedGameTime.TotalSeconds;
+        _player.Update(input, dt);
         _field.Camera.Follow(_player.Position, _field, GraphicsDevice.PresentationParameters);
+
+        _prevKeyboard = kb;
+        kc.Update(gameTime);
 
         // Periodic move-path send (every 100 ms or when state changed).
         if (_player.TryFlushMovePath(out var moveBlob))
@@ -147,10 +168,25 @@ public sealed class FieldStage : Stage
                 _avatar?.Draw(sb, _look, _stat, _player.Stance, _player.Frame, screenPos, _player.FacingLeft);
             }
         }
+        // KeyConfig overlay (F12 to toggle)
+        _keyConfig?.Draw(sb, Game.WhitePixel);
+
         if (!string.IsNullOrEmpty(_statusLabel) && Game.Font is not null)
         {
             Game.Font.Draw(sb, _statusLabel, new Vector2(10, 10), Color.White);
         }
+    }
+
+    public override void OnMouseButton(int x, int y, bool down, MouseButton button)
+    {
+        if (button == MouseButton.Left)
+            _keyConfig?.HandleMouseButton(x, y, down);
+    }
+
+    public override void OnKeyPress(Keys key)
+    {
+        // Let KeyConfig intercept when it's open
+        if (_keyConfig?.IsVisible == true && _keyConfig.OnKeyPress(key)) return;
     }
 
     private void SendUserMove(byte[] movePathBlob)

@@ -36,6 +36,7 @@ public sealed class MapleClaudeGame : Game
     private WzPackage? _charWz;
     private WzPackage? _npcWz;
     private WzPackage? _itemWz;
+    private WzPackage? _mobWz;
     private WzTextureLoader? _cursorLoader;
     private MapleCursor? _cursor;
     private UI.BuiltInFont? _font;
@@ -72,6 +73,7 @@ public sealed class MapleClaudeGame : Game
     public WzPackage? CharWz => _charWz;
     public WzPackage? NpcWz => _npcWz;
     public WzPackage? ItemWz => _itemWz;
+    public WzPackage? MobWz  => _mobWz;
     // Back-compat alias for stages that referenced the longer name.
     public WzPackage? CharacterWz => _charWz;
 
@@ -504,8 +506,9 @@ public sealed class MapleClaudeGame : Game
         _mapWz = TryOpen(Path.Combine(_wzDir, "Map.wz"));
         _soundWz = TryOpen(Path.Combine(_wzDir, "Sound.wz"));
         _charWz = TryOpen(Path.Combine(_wzDir, "Character.wz"));
-        _npcWz = TryOpen(Path.Combine(_wzDir, "Npc.wz"));
+        _npcWz  = TryOpen(Path.Combine(_wzDir, "Npc.wz"));
         _itemWz = TryOpen(Path.Combine(_wzDir, "Item.wz"));
+        _mobWz  = TryOpen(Path.Combine(_wzDir, "Mob.wz"));
     }
 
     private WzPackage? TryOpen(string path)

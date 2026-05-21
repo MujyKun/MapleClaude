@@ -92,6 +92,9 @@ public sealed class ChatBar : GamePanel
         return chatRect.Contains(x, y);
     }
 
+    /// <summary>Called when the user presses Enter to send a message. Wire to <c>GameSender.UserChat</c>.</summary>
+    public Action<string>? OnSendChat { get; set; }
+
     public override bool OnKeyPress(Keys key)
     {
         if (!IsVisible) return false;
@@ -103,6 +106,7 @@ public sealed class ChatBar : GamePanel
                 if (text.Length > 0)
                 {
                     AddLine(text, Color.White);
+                    OnSendChat?.Invoke(text);
                     _input.Clear();
                 }
                 return true;

@@ -50,6 +50,7 @@ public sealed class LoginStage : Stage
     private TextField? _pwField;
 
     private LoginWaitOverlay? _loginWait;
+    private LoginNoticeOverlay? _notice;
     private QuitConfirmOverlay? _quitConfirm;
 
     private readonly List<Button> _allButtons = new();
@@ -200,8 +201,13 @@ public sealed class LoginStage : Stage
                                  GraphicsDevice.PresentationParameters.BackBufferHeight / 2f);
         _loginWait = new LoginWaitOverlay(_loader!, _ui, Game.Font, center)
         {
-            OnCancel = () => _loginWait!.IsVisible = false,
+            OnCancel = () =>
+            {
+                _loginWait!.IsVisible = false;
+                _ = Game.Session.DisconnectAsync();
+            },
         };
+        _notice = new LoginNoticeOverlay(_loader!, _ui, Game.Font, center);
         _quitConfirm = new QuitConfirmOverlay(_loader!, _ui, Game.Font, center)
         {
             OnYes = () => Game.Exit(),
@@ -358,8 +364,8 @@ public sealed class LoginStage : Stage
         ApplyCamera();
         ApplyLayout();
 
-        // Inbound packets are drained once per tick by MapleClaudeGame.Update; no
-        // need to drain again from each stage.
+        // Inbound packets are drained once per tick by MapleClaudeGame.Update.
+        _notice?.Update(gameTime);
         _loginWait?.Update(gameTime);
         _quitConfirm?.Update(gameTime);
 
@@ -583,9 +589,8 @@ public sealed class LoginStage : Stage
             b.Draw(spriteBatch);
         }
 
-        // Connection / error status — drawn below the signboard. Uses a dark
-        // backdrop pad and yellow text so it's readable against the bright
-        // train backdrop (white-on-white was unreadable).
+        // Connection / error status — drawn below the signboard. Dark pad +
+        // yellow text so it's readable against the bright train backdrop.
         if (!string.IsNullOrEmpty(_statusLabel) && Game.Font is not null)
         {
             var font = Game.Font;
@@ -604,6 +609,9 @@ public sealed class LoginStage : Stage
                 new Color(255, 230, 100));
         }
 
+        // Modal notice (archlo's overlay) — sits above the status label but below the wait/quit overlays.
+        _notice?.Draw(spriteBatch, Game.WhitePixel);
+
         // Overlays — drawn last so they sit on top of everything else.
         _loginWait?.Draw(spriteBatch, Game.WhitePixel);
         _quitConfirm?.Draw(spriteBatch, Game.WhitePixel);
@@ -619,16 +627,9 @@ public sealed class LoginStage : Stage
     {
         if (button != MouseButton.Left) return;
 
-        if (_quitConfirm?.IsVisible == true)
-        {
-            _quitConfirm.HandleMouseButton(x, y, down);
-            return;
-        }
-        if (_loginWait?.IsVisible == true)
-        {
-            _loginWait.HandleMouseButton(x, y, down);
-            return;
-        }
+        if (_notice?.IsVisible == true)    { _notice.HandleMouseButton(x, y, down);    return; }
+        if (_quitConfirm?.IsVisible == true) { _quitConfirm.HandleMouseButton(x, y, down); return; }
+        if (_loginWait?.IsVisible == true)   { _loginWait.HandleMouseButton(x, y, down);   return; }
 
         // Buttons first so they can claim the click.
         foreach (var b in _allButtons)
@@ -662,8 +663,9 @@ public sealed class LoginStage : Stage
 
     public override void OnKeyPress(Keys key)
     {
+        if (_notice?.IsVisible == true)      { _notice.OnKeyPress(key);      return; }
         if (_quitConfirm?.IsVisible == true) { _quitConfirm.OnKeyPress(key); return; }
-        if (_loginWait?.IsVisible == true) { _loginWait.OnKeyPress(key); return; }
+        if (_loginWait?.IsVisible == true)   { _loginWait.OnKeyPress(key);   return; }
 
         // Give the focused text field first crack at the key (Ctrl-A/C/V/X,
         // arrows, Home/End, Delete). It returns true if it consumed the key.
