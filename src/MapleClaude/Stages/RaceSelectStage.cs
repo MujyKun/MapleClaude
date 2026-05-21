@@ -174,11 +174,10 @@ public sealed class RaceSelectStage : Stage
     {
         _logger.LogInformation("RaceSelect confirmed: {Race} gender={Gender}",
             RaceNames[_selectedRace], _isMale ? "M" : "F");
-        // Char creation stage (stub — go back to CharSelect for now)
-        Game.StageDirector.Replace(new CharSelectStage(
-            _loggerFactory.CreateLogger<CharSelectStage>(),
+        Game.StageDirector.Replace(new CharCreationStage(
+            _loggerFactory.CreateLogger<CharCreationStage>(),
             _loggerFactory, _ui, _map, _sound,
-            _worldId, _channelId,
+            _worldId, _channelId, _isMale, _selectedRace,
             _scene?.Camera ?? Vector2.Zero, _loginCameraOffset));
     }
 

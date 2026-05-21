@@ -54,6 +54,12 @@ public sealed class GameStage : Stage
     private OptionMenu? _optionMenu;
     private CharInfo? _charInfo;
 
+    // New high-priority panels
+    private WorldMap?       _worldMap;
+    private UserList?       _userList;
+    private ChannelSelect?  _channelSelect;
+    private StatusMessenger? _messenger;
+
     // Modal panels
     private NpcTalk? _npcTalk;
     private Shop? _shop;
@@ -169,6 +175,27 @@ public sealed class GameStage : Stage
         _panels.Add(_shop);
         _panels.Add(_notice);
 
+        // ── New high-priority panels ─────────────────────────────────────────
+        _worldMap      = new WorldMap     (_loader, _ui, font);
+        _userList      = new UserList     (_loader, _ui, font);
+        _channelSelect = new ChannelSelect(_loader, _ui, font);
+        _messenger     = new StatusMessenger(font) { Position = new Vector2(10, 340) };
+
+        _statusBar.OnCommunity = () => _userList!.IsVisible = !_userList.IsVisible;
+
+        _channelSelect.OnChannelChange = ch =>
+            _logger.LogInformation("Channel change requested: CH{Ch} — no packet yet", ch);
+
+        _panels.Add(_worldMap);
+        _panels.Add(_userList);
+        _panels.Add(_channelSelect);
+        _panels.Add(_messenger);
+
+        // Demo messenger messages
+        _messenger.ShowLoot("Blue Snail Shell");
+        _messenger.ShowEXP(12);
+        _messenger.ShowBuff("Magic Guard");
+
         Game.AudioPlayer.Stop();
         _logger.LogInformation("GameStage entered — player skin=0, {NpcCount} NPCs", _npcs.Count);
     }
@@ -200,6 +227,10 @@ public sealed class GameStage : Stage
 
         // NPCs
         foreach (var npc in _npcs) npc.Update(dt);
+
+        // Feed MiniMap map bounds so the coordinate projection matches the camera
+        if (_miniMap != null)
+            _miniMap.SetMapInfo("Maple Road", "Henesys", _camera.MapBounds);
 
         // Sync stats to panels
         if (_statusBar != null)
@@ -296,7 +327,11 @@ public sealed class GameStage : Stage
             case Keys.F11: _keyConfig!.IsVisible = !_keyConfig.IsVisible; break;
             case Keys.S: _stats!.IsVisible = !_stats.IsVisible; break;
             case Keys.Q: _quest!.IsVisible = !_quest.IsVisible; break;
-            case Keys.M: _miniMap!.IsVisible = !_miniMap.IsVisible; break;
+            case Keys.M: _miniMap!.IsVisible    = !_miniMap.IsVisible; break;
+            case Keys.W: _worldMap!.IsVisible   = !_worldMap.IsVisible; break;
+            case Keys.U: _userList!.IsVisible   = !_userList.IsVisible; break;
+            case Keys.OemQuestion: // ? = channel select
+            case Keys.F9: _channelSelect!.IsVisible = !_channelSelect.IsVisible; break;
         }
     }
 
