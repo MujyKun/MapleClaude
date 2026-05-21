@@ -213,9 +213,10 @@ public sealed class GameStage : Stage
 
         // Read held keys each frame (movement is frame-continuous)
         var kb = Keyboard.GetState();
-        _moveLeft = kb.IsKeyDown(Keys.A) || kb.IsKeyDown(Keys.Left);
-        _moveRight = kb.IsKeyDown(Keys.D) || kb.IsKeyDown(Keys.Right);
-        _jumpPressed = kb.IsKeyDown(Keys.Space) || kb.IsKeyDown(Keys.W) || kb.IsKeyDown(Keys.Up);
+        // Movement driven by KeyConfig bindings — respects user rebinds
+        _moveLeft   = _keyConfig!.IsActionDown(kb, KeyConfig.KeyAction.MoveLeft);
+        _moveRight  = _keyConfig!.IsActionDown(kb, KeyConfig.KeyAction.MoveRight);
+        _jumpPressed = _keyConfig!.IsActionDown(kb, KeyConfig.KeyAction.Jump);
 
         // Player + camera
         if (_player != null)
@@ -318,20 +319,58 @@ public sealed class GameStage : Stage
         foreach (var p in _panels)
             if (p.IsVisible && p.OnKeyPress(key)) return;
 
-        switch (key)
+        // F12 always opens KeyConfig (meta-key — not itself bindable)
+        if (key == Keys.F12) { _keyConfig!.IsVisible = !_keyConfig.IsVisible; return; }
+
+        // All other keys routed through KeyConfig bindings
+        DispatchAction(_keyConfig!.GetAction(key));
+    }
+
+    private void DispatchAction(KeyConfig.KeyAction action)
+    {
+        switch (action)
         {
-            case Keys.E: _equip!.IsVisible = !_equip.IsVisible; break;
-            case Keys.I: _item!.IsVisible = !_item.IsVisible; break;
-            case Keys.K: _skill!.IsVisible      = !_skill.IsVisible; break;
-            case Keys.OemTilde:
-            case Keys.F11: _keyConfig!.IsVisible = !_keyConfig.IsVisible; break;
-            case Keys.S: _stats!.IsVisible = !_stats.IsVisible; break;
-            case Keys.Q: _quest!.IsVisible = !_quest.IsVisible; break;
-            case Keys.M: _miniMap!.IsVisible    = !_miniMap.IsVisible; break;
-            case Keys.W: _worldMap!.IsVisible   = !_worldMap.IsVisible; break;
-            case Keys.U: _userList!.IsVisible   = !_userList.IsVisible; break;
-            case Keys.OemQuestion: // ? = channel select
-            case Keys.F9: _channelSelect!.IsVisible = !_channelSelect.IsVisible; break;
+            // ── Panel toggles (matched to GMS v95 KeyAction IDs) ─────────────
+            case KeyConfig.KeyAction.Equipment:      _equip!.IsVisible         = !_equip.IsVisible;         break;
+            case KeyConfig.KeyAction.Items:          _item!.IsVisible          = !_item.IsVisible;           break;
+            case KeyConfig.KeyAction.Skills:         _skill!.IsVisible         = !_skill.IsVisible;          break;
+            case KeyConfig.KeyAction.Stats:          _stats!.IsVisible         = !_stats.IsVisible;          break;
+            case KeyConfig.KeyAction.QuestLog:       _quest!.IsVisible         = !_quest.IsVisible;          break;
+            case KeyConfig.KeyAction.MiniMap:        _miniMap!.IsVisible       = !_miniMap.IsVisible;        break;
+            case KeyConfig.KeyAction.WorldMap:       _worldMap!.IsVisible      = !_worldMap.IsVisible;       break;
+            case KeyConfig.KeyAction.KeyBindings:    _keyConfig!.IsVisible     = !_keyConfig.IsVisible;      break;
+            case KeyConfig.KeyAction.CharInfo:       _charInfo!.IsVisible      = !_charInfo.IsVisible;       break;
+            case KeyConfig.KeyAction.ChangeChannel:  _channelSelect!.IsVisible = !_channelSelect.IsVisible;  break;
+            case KeyConfig.KeyAction.Menu:           _optionMenu!.IsVisible    = !_optionMenu.IsVisible;     break;
+            case KeyConfig.KeyAction.MainMenu:       _optionMenu!.IsVisible    = !_optionMenu.IsVisible;     break;
+            // Social panels — open UserList to the relevant tab
+            case KeyConfig.KeyAction.Friends:
+            case KeyConfig.KeyAction.BuddyChat:      _userList!.IsVisible      = !_userList.IsVisible;       break;
+            case KeyConfig.KeyAction.Party:          _userList!.IsVisible      = !_userList.IsVisible;       break;
+            case KeyConfig.KeyAction.Guild:          _userList!.IsVisible      = !_userList.IsVisible;       break;
+            case KeyConfig.KeyAction.BossParty:      _userList!.IsVisible      = !_userList.IsVisible;       break;
+            // Chat
+            case KeyConfig.KeyAction.Say:
+            case KeyConfig.KeyAction.ToggleChat:
+            case KeyConfig.KeyAction.MapleChat:      _chatBar!.IsVisible       = !_chatBar.IsVisible;        break;
+            // Cash Shop
+            case KeyConfig.KeyAction.CashShop:
+                Game.StageDirector.Push(new CashShopStage(
+                    _loggerFactory.CreateLogger<CashShopStage>(), _ui, Game.Font,
+                    Game.GraphicsDevice.PresentationParameters.BackBufferWidth,
+                    Game.GraphicsDevice.PresentationParameters.BackBufferHeight));
+                break;
+            // In-game actions (wired to packets via Kinoko later)
+            case KeyConfig.KeyAction.Attack:
+            case KeyConfig.KeyAction.PickUp:
+            case KeyConfig.KeyAction.Sit:
+            case KeyConfig.KeyAction.Interact:
+                _logger.LogDebug("Action {A} — no packet yet", action);
+                break;
+            case KeyConfig.KeyAction.None:
+            case KeyConfig.KeyAction.MoveLeft:
+            case KeyConfig.KeyAction.MoveRight:
+            case KeyConfig.KeyAction.Jump:           break; // handled in Update
         }
     }
 

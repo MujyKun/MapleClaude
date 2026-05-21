@@ -48,7 +48,7 @@ public sealed class StatusMessenger : GamePanel
         public MsgEntry(string t, Color c) { Text = t; Color = c; }
     }
 
-    private readonly System.Collections.Generic.Queue<MsgEntry> _msgs = new();
+    private readonly Queue<MsgEntry> _msgs = new();
     private readonly BuiltInFont? _font;
 
     public StatusMessenger(BuiltInFont? font)
