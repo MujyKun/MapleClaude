@@ -39,10 +39,11 @@ public sealed class ItemInventory : GamePanel
             _allButtons.Add(_btClose);
         }
 
+        var tabEnabled = ((item?.Get("Tab") as WzProperty)?.Get("enabled")) as WzProperty;
         for (var i = 0; i < 5; i++)
         {
             var idx = i;
-            var tabRoot = item?.Get($"Tab/enabled/{i}") as WzProperty;
+            var tabRoot = tabEnabled?.Get($"{i}") as WzProperty;
             if (tabRoot != null)
             {
                 _tabs[i] = new Button(loader, tabRoot) { OnClick = () => _activeTab = idx };

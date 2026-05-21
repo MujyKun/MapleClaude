@@ -67,8 +67,12 @@ public sealed class QuitConfirmOverlay : Overlay
             DrawBorder(sb, white, rect, new Color(100, 100, 140));
         }
 
-        _font?.Draw(sb, "Are you sure you want to quit?", _center + new Vector2(0, -12),
-            Color.White, centered: true);
+        if (_font != null)
+        {
+            var msg = "Are you sure you want to quit?";
+            var sz = _font.Measure(msg);
+            _font.Draw(sb, msg, _center + new Vector2(-sz.X / 2f, -12), Color.White);
+        }
         _btYes?.Draw(sb);
         _btNo?.Draw(sb);
     }

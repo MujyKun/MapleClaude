@@ -31,6 +31,8 @@ public sealed class MapleClaudeGame : Game
     private WzPackage? _uiWz;
     private WzPackage? _mapWz;
     private WzPackage? _soundWz;
+    private WzPackage? _charWz;
+    private WzPackage? _npcWz;
     private WzTextureLoader? _cursorLoader;
     private MapleCursor? _cursor;
     private UI.BuiltInFont? _font;
@@ -61,6 +63,8 @@ public sealed class MapleClaudeGame : Game
 
     public Texture2D WhitePixel => _white;
     public WzAudioPlayer AudioPlayer { get; }
+    public WzPackage? CharWz => _charWz;
+    public WzPackage? NpcWz => _npcWz;
 
     /// <summary>Shared registry of tunable items exposed to the debug window.</summary>
     public DebugRegistry DebugRegistry { get; }
@@ -236,6 +240,8 @@ public sealed class MapleClaudeGame : Game
         _uiWz?.Dispose();
         _mapWz?.Dispose();
         _soundWz?.Dispose();
+        _charWz?.Dispose();
+        _npcWz?.Dispose();
         _spriteBatch?.Dispose();
         _white?.Dispose();
         _windowIcon?.Dispose();
@@ -396,6 +402,8 @@ public sealed class MapleClaudeGame : Game
         _uiWz = TryOpen(Path.Combine(_wzDir, "UI.wz"));
         _mapWz = TryOpen(Path.Combine(_wzDir, "Map.wz"));
         _soundWz = TryOpen(Path.Combine(_wzDir, "Sound.wz"));
+        _charWz = TryOpen(Path.Combine(_wzDir, "Character.wz"));
+        _npcWz = TryOpen(Path.Combine(_wzDir, "Npc.wz"));
     }
 
     private WzPackage? TryOpen(string path)

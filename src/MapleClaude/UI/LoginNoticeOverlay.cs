@@ -76,8 +76,11 @@ public sealed class LoginNoticeOverlay : Overlay
             DrawBorder(sb, white, rect, new Color(120, 100, 60));
         }
 
-        _font?.Draw(sb, _message, _center + new Vector2(0, -10),
-            Color.White, centered: true);
+        if (_font != null)
+        {
+            var sz = _font.Measure(_message);
+            _font.Draw(sb, _message, _center + new Vector2(-sz.X / 2f, -10), Color.White);
+        }
 
         _btOk?.Draw(sb);
         if (_type == NoticeType.OkCancel) _btCancel?.Draw(sb);

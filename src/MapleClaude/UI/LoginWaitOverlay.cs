@@ -79,8 +79,12 @@ public sealed class LoginWaitOverlay : Overlay
             DrawBorder(sb, white, border, new Color(100, 100, 120));
         }
 
-        _font?.Draw(sb, "Connecting...", _center + new Vector2(0, -20),
-            Color.White, centered: true);
+        if (_font != null)
+        {
+            var msg = "Connecting...";
+            var sz = _font.Measure(msg);
+            _font.Draw(sb, msg, _center + new Vector2(-sz.X / 2f, -20), Color.White);
+        }
         _btCancel?.Draw(sb);
     }
 

@@ -1,4 +1,7 @@
 using MapleClaude.App;
+using MapleClaude.Character;
+using System.Linq;
+using MapleClaude.Map;
 using MapleClaude.Render;
 using MapleClaude.UI;
 using MapleClaude.UI.Game;
@@ -11,12 +14,12 @@ using Microsoft.Xna.Framework.Input;
 namespace MapleClaude.Stages;
 
 /// <summary>
-/// In-game stage. Placeholder map background until the map packet pipeline is wired.
-/// Hosts all game UI panels: StatusBar, MiniMap, ChatBar, BuffList, and the toggle
-/// panels (Equip/Item/Skill/Stats/Quest/KeyConfig/Option/CharInfo/NpcTalk/Shop/Notice).
+/// In-game stage. Renders a game map, a player character, and NPC sprites.
+/// Camera follows the player with smooth lerp and map bounds clamping.
 /// Key bindings:
-///   E = EquipInventory, I = ItemInventory, K = SkillBook, S = StatsInfo, Q = QuestLog
-///   M = MiniMap toggle
+///   Move: A/D or Left/Right arrows
+///   Jump: Space or W/Up arrow
+///   Panels: E=Equip  I=Items  K=Skills  S=Stats  Q=Quest  M=MiniMap
 /// </summary>
 public sealed class GameStage : Stage
 {
@@ -25,8 +28,15 @@ public sealed class GameStage : Stage
     private readonly WzPackage? _ui;
     private readonly WzPackage? _map;
     private readonly WzPackage? _sound;
+    private readonly WzPackage? _charWz;
+    private readonly WzPackage? _npcWz;
 
     private WzTextureLoader? _loader;
+
+    // World
+    private GameCamera _camera = null!;
+    private CharLook? _player;
+    private readonly List<NpcLook> _npcs = new();
 
     // Always-visible panels
     private StatusBar? _statusBar;
@@ -50,21 +60,29 @@ public sealed class GameStage : Stage
     private Notice? _notice;
     private QuitConfirmOverlay? _quitConfirm;
 
-    // Ordered list for input dispatch (modal-first)
     private readonly List<GamePanel> _panels = new();
+
+    // Input state
+    private bool _moveLeft;
+    private bool _moveRight;
+    private bool _jumpPressed;
 
     public GameStage(
         ILogger<GameStage> logger,
         ILoggerFactory loggerFactory,
         WzPackage? ui,
         WzPackage? map,
-        WzPackage? sound)
+        WzPackage? sound,
+        WzPackage? charWz,
+        WzPackage? npcWz)
     {
         _logger = logger;
         _loggerFactory = loggerFactory;
         _ui = ui;
         _map = map;
         _sound = sound;
+        _charWz = charWz;
+        _npcWz = npcWz;
     }
 
     public override void OnEnter(MapleClaudeGame game)
@@ -72,13 +90,32 @@ public sealed class GameStage : Stage
         base.OnEnter(game);
         _loader = new WzTextureLoader(GraphicsDevice);
 
+        var pp = GraphicsDevice.PresentationParameters;
         var font = Game.Font;
 
-        _statusBar = new StatusBar(_loader, _ui, font);
-        _chatBar = new ChatBar(_loader, _ui, font);
-        _miniMap = new MiniMap(_loader, _ui, font);
-        _buffList = new BuffList(_loader, _ui, font);
+        // Camera — starts at screen centre, follows player
+        _camera = new GameCamera(Vector2.Zero)
+        {
+            ViewWidth = pp.BackBufferWidth,
+            ViewHeight = pp.BackBufferHeight,
+            MapBounds = new Rectangle(-3000, -2000, 6000, 4000),
+            FollowSpeed = 5f,
+        };
 
+        // Player character — spawn at map origin
+        _player = new CharLook(_loader, skinId: 0) { Position = Vector2.Zero };
+        _player.Load(_charWz);
+
+        // Sample NPCs — placed at fixed world positions (replaced by server data later)
+        SpawnNpc(9000001, new Vector2(-200, 0), "Henesys Merchant");
+        SpawnNpc(1012000, new Vector2(200, 0), "Maple Administrator");
+        SpawnNpc(1052002, new Vector2(400, 0), "Henesys Potion Seller");
+
+        // UI panels
+        _statusBar = new StatusBar(_loader, _ui, font) { IsVisible = true };
+        _chatBar = new ChatBar(_loader, _ui, font) { IsVisible = true };
+        _miniMap = new MiniMap(_loader, _ui, font) { IsVisible = true };
+        _buffList = new BuffList(_loader, _ui, font) { IsVisible = true };
         _equip = new EquipInventory(_loader, _ui, font);
         _item = new ItemInventory(_loader, _ui, font);
         _skill = new SkillBook(_loader, _ui, font);
@@ -87,21 +124,31 @@ public sealed class GameStage : Stage
         _keyConfig = new KeyConfig(_loader, _ui, font);
         _optionMenu = new OptionMenu(_loader, _ui, font);
         _charInfo = new CharInfo(_loader, _ui, font);
-
         _npcTalk = new NpcTalk(_loader, _ui, font);
         _shop = new Shop(_loader, _ui, font);
         _notice = new Notice(_loader, _ui, font);
 
-        _quitConfirm = new QuitConfirmOverlay(_loader, _ui, font, new Vector2(400, 300));
-        _quitConfirm.OnYes = () => Game.Exit();
-        _quitConfirm.OnNo = () => _quitConfirm.IsVisible = false;
+        _quitConfirm = new QuitConfirmOverlay(_loader, _ui, font, new Vector2(400, 300))
+        {
+            OnYes = () => Game.Exit(),
+            OnNo = () => _quitConfirm!.IsVisible = false,
+        };
 
-        // StatusBar button callbacks
-        _statusBar.OnMenu = () => _optionMenu!.IsVisible = !_optionMenu.IsVisible;
-        _statusBar.OnCharacter = () => _stats!.IsVisible = !_stats.IsVisible;
-        _statusBar.OnQuit = () => _quitConfirm!.IsVisible = true;
+        // StatusBar full submenu callbacks
+        _statusBar.OnInfo    = () => _charInfo!.IsVisible  = !_charInfo.IsVisible;
+        _statusBar.OnEquip   = () => _equip!.IsVisible     = !_equip.IsVisible;
+        _statusBar.OnItems   = () => _item!.IsVisible      = !_item.IsVisible;
+        _statusBar.OnSkills  = () => _skill!.IsVisible     = !_skill.IsVisible;
+        _statusBar.OnStats   = () => _stats!.IsVisible     = !_stats.IsVisible;
+        _statusBar.OnOptions = () => _optionMenu!.IsVisible = !_optionMenu.IsVisible;
+        _statusBar.OnKeys    = () => _keyConfig!.IsVisible  = !_keyConfig.IsVisible;
+        _statusBar.OnQuit    = () => _quitConfirm!.IsVisible = true;
+        _statusBar.OnCharacter = () => _stats!.IsVisible   = !_stats.IsVisible;
+        _statusBar.OnMenu    = () => _optionMenu!.IsVisible = !_optionMenu.IsVisible;
 
-        // Register all toggle panels in draw/input order (modals last so they receive input first)
+        // MiniMap: set map info and initial bounds
+        _miniMap.SetMapInfo("Maple Road", "Henesys", new Rectangle(-3000, -2000, 6000, 4000));
+
         _panels.Add(_statusBar);
         _panels.Add(_chatBar);
         _panels.Add(_miniMap);
@@ -118,10 +165,8 @@ public sealed class GameStage : Stage
         _panels.Add(_shop);
         _panels.Add(_notice);
 
-        // Play in-game BGM placeholder (SFX channel leaves login music)
         Game.AudioPlayer.Stop();
-
-        _logger.LogInformation("GameStage entered — {PanelCount} panels", _panels.Count);
+        _logger.LogInformation("GameStage entered — player skin=0, {NpcCount} NPCs", _npcs.Count);
     }
 
     public override void OnExit()
@@ -133,6 +178,44 @@ public sealed class GameStage : Stage
 
     public override void Update(GameTime gameTime)
     {
+        var dt = (float)gameTime.ElapsedGameTime.TotalSeconds;
+
+        // Read held keys each frame (movement is frame-continuous)
+        var kb = Keyboard.GetState();
+        _moveLeft = kb.IsKeyDown(Keys.A) || kb.IsKeyDown(Keys.Left);
+        _moveRight = kb.IsKeyDown(Keys.D) || kb.IsKeyDown(Keys.Right);
+        _jumpPressed = kb.IsKeyDown(Keys.Space) || kb.IsKeyDown(Keys.W) || kb.IsKeyDown(Keys.Up);
+
+        // Player + camera
+        if (_player != null)
+        {
+            _player.Update(dt, _moveLeft, _moveRight, _jumpPressed);
+            _camera.Target = _player.Position;
+        }
+        _camera.Update(dt);
+
+        // NPCs
+        foreach (var npc in _npcs) npc.Update(dt);
+
+        // Sync stats to panels
+        if (_statusBar != null)
+        {
+            _statusBar.Hp      = _stats?.Hp      ?? 50;
+            _statusBar.MaxHp   = _stats?.MaxHp   ?? 50;
+            _statusBar.Mp      = _stats?.Mp       ?? 30;
+            _statusBar.MaxMp   = _stats?.MaxMp    ?? 30;
+            _statusBar.Level   = _stats?.Level    ?? 1;
+            _statusBar.CharName = _charInfo?.CharName ?? "Hero";
+        }
+
+        // Feed player position + NPC dots to minimap
+        if (_miniMap != null && _player != null)
+        {
+            _miniMap.PlayerWorldPos = _player.Position;
+            _miniMap.SetDots(_npcs.Select(n => (n.Position, new Color(255, 220, 80))));
+        }
+
+        // Panels
         foreach (var p in _panels) p.Update(gameTime);
         _quitConfirm?.Update(gameTime);
     }
@@ -143,81 +226,80 @@ public sealed class GameStage : Stage
         var w = pp.BackBufferWidth;
         var h = pp.BackBufferHeight;
 
-        // Placeholder: dark green map tint until map rendering is wired
-        sb.Draw(Game.WhitePixel, new Rectangle(0, 0, w, h), new Color(30, 50, 30));
+        // Map background (placeholder tiled green)
+        sb.Draw(Game.WhitePixel, new Rectangle(0, 0, w, h), new Color(34, 85, 34));
+        DrawGroundPlane(sb, w, h);
 
-        // Draw panels back-to-front (modals on top)
+        // NPCs (world-space → screen)
+        foreach (var npc in _npcs)
+        {
+            var sp = _camera.WorldToScreen(npc.Position);
+            if (sp.X > -100 && sp.X < w + 100)
+                npc.Draw(sb, Game.WhitePixel, sp);
+        }
+
+        // Player character
+        if (_player != null)
+        {
+            var playerScreen = _camera.WorldToScreen(_player.Position);
+            _player.Draw(sb, Game.WhitePixel, playerScreen);
+        }
+
+        // UI panels (screen-space)
         foreach (var p in _panels)
             p.Draw(sb, Game.WhitePixel);
 
         _quitConfirm?.Draw(sb, Game.WhitePixel);
     }
 
+    private void DrawGroundPlane(SpriteBatch sb, int w, int h)
+    {
+        // A simple ground line so the player has a visual reference
+        var groundScreen = _camera.WorldToScreen(Vector2.Zero);
+        var groundY = (int)groundScreen.Y;
+        sb.Draw(Game.WhitePixel, new Rectangle(0, groundY, w, 4), new Color(80, 60, 40));
+        // Dirt fill below
+        if (groundY < h)
+            sb.Draw(Game.WhitePixel, new Rectangle(0, groundY + 4, w, h - groundY), new Color(100, 70, 40));
+    }
+
     public override void OnMouseButton(int x, int y, bool down, MouseButton button)
     {
         if (button != MouseButton.Left) return;
-
-        // Quit confirm is topmost
-        if (_quitConfirm?.IsVisible == true)
-        {
-            _quitConfirm.HandleMouseButton(x, y, down);
-            return;
-        }
-
-        // Modal panels intercept first (notice, npcTalk, shop) — reverse order so top renders last
+        if (_quitConfirm?.IsVisible == true) { _quitConfirm.HandleMouseButton(x, y, down); return; }
         for (var i = _panels.Count - 1; i >= 0; i--)
         {
             var p = _panels[i];
-            if (p.IsVisible && p.HandleMouseButton(x, y, down))
-                return;
+            if (p.IsVisible && p.HandleMouseButton(x, y, down)) return;
         }
     }
 
-    public override void OnTextInput(char ch)
-    {
-        _chatBar?.OnTextInput(ch);
-    }
+    public override void OnTextInput(char ch) => _chatBar?.OnTextInput(ch);
 
     public override void OnKeyPress(Keys key)
     {
-        if (_quitConfirm?.IsVisible == true)
-        {
-            _quitConfirm.OnKeyPress(key);
-            return;
-        }
+        if (_quitConfirm?.IsVisible == true) { _quitConfirm.OnKeyPress(key); return; }
 
-        // Let visible modal panels handle first
         foreach (var p in _panels)
-        {
-            if (p.IsVisible && p.OnKeyPress(key))
-                return;
-        }
+            if (p.IsVisible && p.OnKeyPress(key)) return;
 
-        // Global key bindings
         switch (key)
         {
-            case Keys.E:
-                _equip!.IsVisible = !_equip.IsVisible;
-                break;
-            case Keys.I:
-                _item!.IsVisible = !_item.IsVisible;
-                break;
-            case Keys.K:
-                _skill!.IsVisible = !_skill.IsVisible;
-                break;
-            case Keys.S:
-                _stats!.IsVisible = !_stats.IsVisible;
-                break;
-            case Keys.Q:
-                _quest!.IsVisible = !_quest.IsVisible;
-                break;
-            case Keys.M:
-                _miniMap!.IsVisible = !_miniMap.IsVisible;
-                break;
-            case Keys.Back:
-                // Return to CharSelect (no-op for now — real game wouldn't allow this)
-                _logger.LogInformation("GameStage: Back pressed (use quit confirm instead)");
-                break;
+            case Keys.E: _equip!.IsVisible = !_equip.IsVisible; break;
+            case Keys.I: _item!.IsVisible = !_item.IsVisible; break;
+            case Keys.K: _skill!.IsVisible      = !_skill.IsVisible; break;
+            case Keys.OemTilde:
+            case Keys.F11: _keyConfig!.IsVisible = !_keyConfig.IsVisible; break;
+            case Keys.S: _stats!.IsVisible = !_stats.IsVisible; break;
+            case Keys.Q: _quest!.IsVisible = !_quest.IsVisible; break;
+            case Keys.M: _miniMap!.IsVisible = !_miniMap.IsVisible; break;
         }
+    }
+
+    private void SpawnNpc(int id, Vector2 worldPos, string name)
+    {
+        var npc = new NpcLook(id, worldPos, Game.Font) { Name = name };
+        npc.Load(_loader!, _npcWz);
+        _npcs.Add(npc);
     }
 }

@@ -8,159 +8,367 @@ using Microsoft.Xna.Framework.Input;
 namespace MapleClaude.UI.Game;
 
 /// <summary>
-/// Bottom status bar. Always visible. Shows HP/MP/EXP gauges and menu buttons.
-/// WZ: <c>StatusBar3.img/mainBar/</c>
-/// Buttons open their respective panels via callbacks.
+/// Bottom status bar. Always visible at y=480 on 800x600.
+///
+/// Layout (fallback mode, no WZ):
+///   [Lv.N Name] [HP bar] [MP bar]   [quickslot 0-7]   [CHR][CMM][EV][MENU][CS]
+///   [======= EXP bar ========================================]
+///
+/// WZ: StatusBar3.img/mainBar/
+///   status / status800   — background sprite
+///   gauge/hp, gauge/mp   — filled gauge sprites
+///   EXPBar               — exp bar sprite
+///   quickSlot            — quickslot background
+///   submenu              — submenu button set
 /// </summary>
 public sealed class StatusBar : GamePanel
 {
-    private readonly WzSprite? _barSprite;
-    private readonly WzSprite? _hpGauge;
-    private readonly WzSprite? _mpGauge;
-    private readonly WzSprite? _expBar;
+    // ── WZ sprites ──────────────────────────────────────────────────────────
+    private readonly WzSprite? _barBg;
+    private readonly WzSprite? _hpFill;
+    private readonly WzSprite? _mpFill;
+    private readonly WzSprite? _expFill;
+    private readonly WzSprite? _quickSlotBg;
+
+    // ── Main-toolbar buttons ─────────────────────────────────────────────────
+    private readonly Button? _btCharacter;   // opens Character submenu
+    private readonly Button? _btCommunity;   // opens Community submenu
+    private readonly Button? _btEvent;
+    private readonly Button? _btMenu;        // opens Menu submenu
+    private readonly Button? _btCashShop;
+    private readonly List<Button> _mainButtons = new();
+
+    // ── Submenu system ───────────────────────────────────────────────────────
+    private enum SubMenu { None, Character, Setting, Community, Menu }
+    private SubMenu _openSub = SubMenu.None;
+
+    // Character sub: Info, Equip, Items, Skills, Stats
+    private readonly Button?[] _charSubBtns = new Button?[5];
+    private static readonly string[] CharSubNames = ["Info", "Equip", "Items", "Skills", "Stats"];
+
+    // Setting sub: Channel, Options, Keys, Quit
+    private readonly Button?[] _settingSubBtns = new Button?[4];
+    private static readonly string[] SettingSubNames = ["Channel", "Options", "Keys", "Quit"];
+
+    // ── Character stats (wired by GameStage) ────────────────────────────────
+    public int Level { get; set; } = 1;
+    public string CharName { get; set; } = "Unnamed";
+    public int Hp { get; set; } = 50;  public int MaxHp { get; set; } = 50;
+    public int Mp { get; set; } = 30;  public int MaxMp { get; set; } = 30;
+    public long Exp { get; set; } = 0; public long NextExp { get; set; } = 100;
+
+    // ── Quickslot ────────────────────────────────────────────────────────────
+    private readonly string[] _slotLabels = ["1", "2", "3", "4", "5", "6", "7", "8"];
+    private const int SlotW = 32;
+    private const int SlotH = 32;
+
+    // ── Callbacks ────────────────────────────────────────────────────────────
+    public Action? OnInfo    { get; set; }
+    public Action? OnEquip   { get; set; }
+    public Action? OnItems   { get; set; }
+    public Action? OnSkills  { get; set; }
+    public Action? OnStats   { get; set; }
+    public Action? OnOptions { get; set; }
+    public Action? OnKeys    { get; set; }
+    public Action? OnQuit    { get; set; }
+    public Action? OnCashShop{ get; set; }
+
     private readonly BuiltInFont? _font;
 
-    private readonly Button? _btMenu;
-    private readonly Button? _btCharacter;
-    private readonly Button? _btCommunity;
-    private readonly Button? _btEvent;
-    private readonly Button? _btCashShop;
-    private readonly Button? _btQuit;
-    private readonly List<Button> _allButtons = new();
+    // Pre-computed gauge values
+    private float _hpPct, _mpPct, _expPct;
 
-    private float _hpPercent = 0f;
-    private float _mpPercent = 0f;
-    private float _expPercent = 0f;
-
-    public Action? OnMenu { get; set; }
-    public Action? OnCharacter { get; set; }
-    public Action? OnCommunity { get; set; }
-    public Action? OnCashShop { get; set; }
-    public Action? OnQuit { get; set; }
-
-    // Placeholder stats — will be set by packet handlers once wired
-    public int Level { get; set; } = 1;
-    public string CharName { get; set; } = string.Empty;
-    public int Hp { get; set; } = 50;
-    public int MaxHp { get; set; } = 50;
-    public int Mp { get; set; } = 50;
-    public int MaxMp { get; set; } = 50;
-    public long Exp { get; set; } = 0;
-    public long NextExp { get; set; } = 1;
+    // Constants matching v95 800x600 layout
+    private const int BarY     = 480;
+    private const int GaugeX   = 130;
+    private const int HpY      = 487;
+    private const int MpY      = 502;
+    private const int GaugeW   = 139;
+    private const int GaugeH   = 10;
+    private const int ExpY     = 477;
+    private const int ExpH     = 4;
+    private const int QsBaseX  = 270;
+    private const int QsY      = 484;
 
     public StatusBar(WzTextureLoader loader, WzPackage? ui, BuiltInFont? font)
     {
         _font = font;
         IsVisible = true;
-        Position = new Vector2(0, 480);
+        Position = new Vector2(0, BarY);
 
-        var bar = ui?.GetItem("StatusBar3.img/mainBar") as WzProperty;
-        var status = bar?.Get("status") ?? bar?.Get("status800");
-        _barSprite = status is WzCanvas bc ? loader.Load(bc) : null;
+        // Background
+        var mainBar = ui?.GetItem("StatusBar3.img/mainBar") as WzProperty;
+        var statusNode = mainBar?.Get("status") ?? mainBar?.Get("status800");
+        _barBg = statusNode is WzCanvas sc ? loader.Load(sc) : null;
 
-        var gauge = ui?.GetItem("StatusBar3.img/gauge") as WzProperty;
-        _hpGauge = LoadFromProp(loader, gauge, "hp/layer:0");
-        _mpGauge = LoadFromProp(loader, gauge, "mp/layer:0");
-        _expBar = LoadFromProp(loader, bar, "EXPBar/0");
+        // Gauge fills
+        var gaugeNode = (mainBar?.Get("status") as WzProperty)?.Get("gauge") as WzProperty;
+        _hpFill = LoadCanvas(loader, gaugeNode, "hp");
+        _mpFill = LoadCanvas(loader, gaugeNode, "mp");
+        _expFill = LoadCanvas(loader, mainBar, "EXPBar/0");
+        _quickSlotBg = LoadCanvas(loader, mainBar, "quickSlot/0");
 
-        _btMenu = MakeButton(loader, ui, "StatusBar3.img/mainBar/menu/BT_MENU",
-            () => OnMenu?.Invoke());
-        _btCharacter = MakeButton(loader, ui, "StatusBar3.img/mainBar/menu/BT_CHARACTER",
-            () => OnCharacter?.Invoke());
-        _btCommunity = MakeButton(loader, ui, "StatusBar3.img/mainBar/menu/BT_COMMUNITY",
-            () => OnCommunity?.Invoke());
-        _btCashShop = MakeButton(loader, ui, "StatusBar3.img/mainBar/BT_CASHSHOP",
+        // Main-toolbar buttons
+        var sub = mainBar?.Get("submenu") as WzProperty;
+        _btCharacter = MakeMainBtn(loader, sub, "character/0/normal/0",
+            () => ToggleSub(SubMenu.Character));
+        _btCommunity = MakeMainBtn(loader, sub, "community/0/normal/0",
+            () => ToggleSub(SubMenu.Community));
+        _btEvent     = MakeMainBtn(loader, sub, "event/0/normal/0", () => { });
+        _btMenu      = MakeMainBtn(loader, sub, "menu/0/normal/0",
+            () => ToggleSub(SubMenu.Menu));
+        _btCashShop  = MakeMainBtn(loader, mainBar, "BT_CASHSHOP",
             () => OnCashShop?.Invoke());
-        _btQuit = MakeButton(loader, ui, "StatusBar3.img/mainBar/setting/BT_QUIT",
-            () => OnQuit?.Invoke());
 
-        PositionButtons();
+        // Character sub-buttons (drawn if _openSub == Character)
+        var charSub = (sub?.Get("character") as WzProperty);
+        for (var i = 0; i < _charSubBtns.Length; i++)
+        {
+            var idx = i;
+            var root = (charSub?.Get($"{i}") as WzProperty);
+            // These are plain text buttons with fallback drawn rendering
+            _charSubBtns[i] = root != null ? new Button(loader, root) { OnClick = () => CharSubClick(idx) } : null;
+        }
+
+        var settSub = sub?.Get("setting") as WzProperty;
+        for (var i = 0; i < _settingSubBtns.Length; i++)
+        {
+            var idx = i;
+            var root = settSub?.Get($"{i}") as WzProperty;
+            _settingSubBtns[i] = root != null ? new Button(loader, root) { OnClick = () => SettingSubClick(idx) } : null;
+        }
+
+        LayoutMainButtons();
     }
 
-    private void PositionButtons()
+    private void ToggleSub(SubMenu m) =>
+        _openSub = _openSub == m ? SubMenu.None : m;
+
+    private void CharSubClick(int i)
     {
-        if (_btMenu != null) _btMenu.Position = new Vector2(520, 492);
-        if (_btCharacter != null) _btCharacter.Position = new Vector2(560, 492);
-        if (_btCommunity != null) _btCommunity.Position = new Vector2(600, 492);
-        if (_btCashShop != null) _btCashShop.Position = new Vector2(700, 492);
-        if (_btQuit != null) _btQuit.Position = new Vector2(760, 492);
+        _openSub = SubMenu.None;
+        switch (i)
+        {
+            case 0: OnInfo?.Invoke(); break;
+            case 1: OnEquip?.Invoke(); break;
+            case 2: OnItems?.Invoke(); break;
+            case 3: OnSkills?.Invoke(); break;
+            case 4: OnStats?.Invoke(); break;
+        }
     }
 
-    public override void Update(GameTime gameTime)
+    private void SettingSubClick(int i)
     {
-        if (MaxHp > 0) _hpPercent = (float)Hp / MaxHp;
-        if (MaxMp > 0) _mpPercent = (float)Mp / MaxMp;
-        if (NextExp > 0) _expPercent = (float)Exp / NextExp;
+        _openSub = SubMenu.None;
+        switch (i)
+        {
+            case 2: OnKeys?.Invoke(); break;
+            case 3: OnQuit?.Invoke(); break;
+            default: OnOptions?.Invoke(); break;
+        }
+    }
+
+    private void LayoutMainButtons()
+    {
+        // Right-side cluster, 24px spacing, bottom row
+        var btns = new[] { _btCharacter, _btCommunity, _btEvent, _btMenu, _btCashShop };
+        for (var i = 0; i < btns.Length; i++)
+            if (btns[i] != null) btns[i]!.Position = new Vector2(632 + i * 26, BarY + 11);
+    }
+
+    public override void Update(GameTime gt)
+    {
+        if (MaxHp  > 0) _hpPct  = Math.Clamp((float)Hp  / MaxHp,  0f, 1f);
+        if (MaxMp  > 0) _mpPct  = Math.Clamp((float)Mp  / MaxMp,  0f, 1f);
+        if (NextExp > 0) _expPct = Math.Clamp((float)Exp / NextExp, 0f, 1f);
     }
 
     public override void Draw(SpriteBatch sb, Texture2D white)
     {
         if (!IsVisible) return;
 
-        if (_barSprite != null)
-        {
-            _barSprite.Draw(sb, Position + new Vector2(400, 10));
-        }
+        // ── Background ──────────────────────────────────────────────────────
+        if (_barBg != null)
+            _barBg.Draw(sb, new Vector2(400, BarY + 10));
         else
         {
-            // Fallback drawn bar
-            sb.Draw(white, new Rectangle(0, 480, 800, 40), new Color(20, 20, 30));
-            sb.Draw(white, new Rectangle(0, 479, 800, 1), new Color(80, 80, 100));
+            sb.Draw(white, new Rectangle(0, BarY, 800, 40), new Color(18, 18, 28));
+            sb.Draw(white, new Rectangle(0, BarY - 1, 800, 1), new Color(60, 60, 80));
         }
 
-        DrawGauge(sb, white, new Rectangle(128, 490, 140, 10), _hpPercent, new Color(200, 50, 50));
-        DrawGauge(sb, white, new Rectangle(128, 504, 140, 10), _mpPercent, new Color(50, 80, 200));
-        DrawGauge(sb, white, new Rectangle(4, 478, 400, 4), _expPercent, new Color(220, 180, 40));
+        // ── EXP bar ─────────────────────────────────────────────────────────
+        DrawGauge(sb, white, new Rectangle(0, ExpY, 800, ExpH), _expPct,
+            new Color(220, 180, 40), new Color(80, 60, 0, 160));
 
-        _font?.Draw(sb, $"Lv.{Level} {CharName}", new Vector2(6, 483), new Color(220, 200, 150));
-        _font?.Draw(sb, $"{Hp}/{MaxHp}", new Vector2(130, 487), Color.White);
-        _font?.Draw(sb, $"{Mp}/{MaxMp}", new Vector2(130, 501), new Color(150, 180, 255));
+        // ── HP gauge ────────────────────────────────────────────────────────
+        DrawGaugeLabeled(sb, white,
+            new Rectangle(GaugeX, HpY, GaugeW, GaugeH),
+            _hpPct, new Color(220, 50, 50), new Color(0, 0, 0, 140),
+            $"{Hp}/{MaxHp}", new Color(255, 200, 200));
 
-        foreach (var b in _allButtons) b.Draw(sb);
+        // ── MP gauge ────────────────────────────────────────────────────────
+        DrawGaugeLabeled(sb, white,
+            new Rectangle(GaugeX, MpY, GaugeW, GaugeH),
+            _mpPct, new Color(60, 90, 220), new Color(0, 0, 0, 140),
+            $"{Mp}/{MaxMp}", new Color(180, 200, 255));
+
+        // ── Level + name ────────────────────────────────────────────────────
+        _font?.Draw(sb, $"Lv.{Level}", new Vector2(6, BarY + 5), new Color(240, 220, 100));
+        _font?.Draw(sb, CharName,      new Vector2(6, BarY + 18), Color.White);
+
+        // ── HP/MP labels ────────────────────────────────────────────────────
+        _font?.Draw(sb, "HP", new Vector2(GaugeX - 22, HpY), new Color(255, 120, 120));
+        _font?.Draw(sb, "MP", new Vector2(GaugeX - 22, MpY), new Color(120, 160, 255));
+
+        // ── Quickslot ───────────────────────────────────────────────────────
+        DrawQuickSlot(sb, white);
+
+        // ── Main buttons ────────────────────────────────────────────────────
+        foreach (var b in _mainButtons) b.Draw(sb);
+
+        // ── Submenu overlay ──────────────────────────────────────────────────
+        if (_openSub != SubMenu.None)
+            DrawSubMenu(sb, white);
+    }
+
+    private void DrawQuickSlot(SpriteBatch sb, Texture2D white)
+    {
+        for (var i = 0; i < 8; i++)
+        {
+            var rx = QsBaseX + i * (SlotW + 2);
+            var slot = new Rectangle(rx, QsY, SlotW, SlotH);
+            sb.Draw(white, slot, new Color(30, 30, 45));
+            DrawBorder(sb, white, slot, new Color(70, 70, 100));
+            if (_font != null && i < _slotLabels.Length)
+                _font.Draw(sb, _slotLabels[i], new Vector2(rx + 2, QsY + 2), new Color(160, 160, 200));
+        }
+    }
+
+    private void DrawSubMenu(SpriteBatch sb, Texture2D white)
+    {
+        string[] items;
+        int baseX;
+        switch (_openSub)
+        {
+            case SubMenu.Character:
+                items  = CharSubNames;
+                baseX  = (int)(_btCharacter?.Position.X ?? 632);
+                break;
+            case SubMenu.Setting:
+                items  = SettingSubNames;
+                baseX  = (int)(_btMenu?.Position.X ?? 710);
+                break;
+            case SubMenu.Menu:
+                items  = SettingSubNames;
+                baseX  = (int)(_btMenu?.Position.X ?? 710);
+                break;
+            default: return;
+        }
+
+        var menuW = 90;
+        var menuH = items.Length * 20 + 4;
+        var menuY = BarY - menuH - 2;
+        var rect  = new Rectangle(baseX - 4, menuY, menuW, menuH);
+
+        sb.Draw(white, rect, new Color(15, 15, 25, 235));
+        DrawBorder(sb, white, rect, new Color(90, 80, 60));
+
+        for (var i = 0; i < items.Length; i++)
+        {
+            var itemY = menuY + 4 + i * 20;
+            var btn = _openSub == SubMenu.Character ? _charSubBtns[i] : _settingSubBtns[Math.Min(i, _settingSubBtns.Length - 1)];
+            if (btn != null)
+                btn.Position = new Vector2(baseX, itemY + 8);
+            _font?.Draw(sb, items[i], new Vector2(baseX + 4, itemY + 2), Color.White);
+        }
+
+        foreach (var b in (_openSub == SubMenu.Character ? (IEnumerable<Button?>)_charSubBtns : _settingSubBtns))
+            b?.Draw(sb);
     }
 
     public override bool HandleMouseButton(int x, int y, bool down)
     {
         if (!IsVisible) return false;
-        foreach (var b in _allButtons)
+
+        // Submenu intercepts first
+        if (_openSub != SubMenu.None)
+        {
+            var btns = _openSub == SubMenu.Character
+                ? (IEnumerable<Button?>)_charSubBtns
+                : _settingSubBtns;
+            foreach (var b in btns)
+                if (b?.HandleMouseButton(x, y, down) == true) return true;
+            // Click outside submenu → close it
+            if (down) _openSub = SubMenu.None;
+        }
+
+        foreach (var b in _mainButtons)
             if (b.HandleMouseButton(x, y, down)) return true;
-        return false;
+
+        // Claim any click on bar area so it doesn't fall through to game
+        return new Rectangle(0, BarY - 4, 800, 44).Contains(x, y);
     }
 
-    private static void DrawGauge(SpriteBatch sb, Texture2D white, Rectangle bounds, float pct, Color color)
+    // ── Helpers ──────────────────────────────────────────────────────────────
+
+    private static void DrawGauge(SpriteBatch sb, Texture2D white,
+        Rectangle r, float pct, Color fill, Color bg)
     {
-        sb.Draw(white, bounds, new Color(0, 0, 0, 120));
-        if (pct > 0)
+        sb.Draw(white, r, bg);
+        if (pct > 0f)
         {
-            var filled = new Rectangle(bounds.X, bounds.Y, (int)(bounds.Width * Math.Clamp(pct, 0f, 1f)), bounds.Height);
-            sb.Draw(white, filled, color);
+            var fw = new Rectangle(r.X, r.Y, (int)(r.Width * pct), r.Height);
+            sb.Draw(white, fw, fill);
         }
     }
 
-    private static WzSprite? LoadFromProp(WzTextureLoader loader, WzProperty? root, string path)
+    private void DrawGaugeLabeled(SpriteBatch sb, Texture2D white,
+        Rectangle r, float pct, Color fill, Color bg, string label, Color textColor)
     {
-        if (root is null) return null;
-        var parts = path.Split('/');
-        WzNode? node = root;
-        foreach (var p in parts)
+        DrawGauge(sb, white, r, pct, fill, bg);
+        DrawBorder(sb, white, r, new Color(60, 60, 80));
+        if (_font != null)
         {
-            if (node is WzProperty pr) node = pr.Get(p);
-            else return null;
-            if (node is null) return null;
+            var sz = _font.Measure(label);
+            var tx = r.X + (r.Width - (int)sz.X) / 2;
+            _font.Draw(sb, label, new Vector2(tx, r.Y), textColor);
         }
-        return node is WzCanvas c ? loader.Load(c) : null;
     }
 
-    private Button? MakeButton(WzTextureLoader loader, WzPackage? ui, string path, Action onClick)
+    private Button? MakeMainBtn(WzTextureLoader loader, WzProperty? root, string path, Action onClick)
     {
         try
         {
-            var root = ui?.GetItem(path) as WzProperty;
-            if (root is null) return null;
-            var b = new Button(loader, root) { OnClick = onClick };
-            _allButtons.Add(b);
+            // Navigate nested path inside root
+            var node = root;
+            foreach (var part in path.Split('/'))
+                node = node?.Get(part) as WzProperty;
+            if (node is null) return null;
+            var b = new Button(loader, node) { OnClick = onClick };
+            _mainButtons.Add(b);
             return b;
         }
         catch { return null; }
+    }
+
+    private static WzSprite? LoadCanvas(WzTextureLoader loader, WzProperty? root, string path)
+    {
+        if (root is null) return null;
+        var parts = path.Split('/');
+        var cur = root;
+        for (var i = 0; i < parts.Length - 1; i++)
+        {
+            cur = cur?.Get(parts[i]) as WzProperty;
+            if (cur is null) return null;
+        }
+        return cur?.Get(parts[^1]) is WzCanvas c ? loader.Load(c) : null;
+    }
+
+    private static void DrawBorder(SpriteBatch sb, Texture2D white, Rectangle r, Color c)
+    {
+        sb.Draw(white, new Rectangle(r.X, r.Y, r.Width, 1), c);
+        sb.Draw(white, new Rectangle(r.X, r.Bottom - 1, r.Width, 1), c);
+        sb.Draw(white, new Rectangle(r.X, r.Y, 1, r.Height), c);
+        sb.Draw(white, new Rectangle(r.Right - 1, r.Y, 1, r.Height), c);
     }
 }

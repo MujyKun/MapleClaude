@@ -297,7 +297,7 @@ public sealed class CharSelectStage : Stage
         _logger.LogInformation("CharSelect: BtSelect — slot {Slot} — entering game", _selectedSlot);
         Game.StageDirector.Replace(new GameStage(
             _loggerFactory.CreateLogger<GameStage>(),
-            _loggerFactory, _ui, _map, _sound));
+            _loggerFactory, _ui, _map, _sound, Game.CharWz, Game.NpcWz));
     }
 
     private void OnNewClicked()
