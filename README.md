@@ -19,8 +19,8 @@ MapleClaude is a brand-new client written in C# 13 / .NET 10 with MonoGame for r
 | 6 | Inventory: full `Item`/`ItemSlot` decode, initial inventory from `SetField` `CharacterData`, live `InventoryOperation(28)` updates, double-click to use/equip (`UserStatChangeItemUseRequest` / `UserChangeSlotPositionRequest`), drop money | shipped |
 | 7 | Skills + buffs: `SkillBook` driven by `CharacterData` skill records + `ChangeSkillRecordResult`, SP-up + double-click cast (`UserSkillUpRequest` / `UserSkillUseRequest`), optimistic `BuffList` HUD + `TemporaryStatReset` clear | shipped |
 | 8 | Social: map chat + party/buddy/guild chat (`GroupMessage`) + whisper in `ChatBar`; party (`PartyResult`/`PartyRequest`, invite→`/accept`) + friends (`FriendResult`/`FriendRequest`) in `UserList`; chat commands (`/w` `/p` `/invite` `/accept` `/leave`) | shipped |
-| 9 | Drops, pickup, EXP / meso popups (already-built `StatusMessenger` UI hooks up to `DropEnterField` and stat-change packets) | planned |
-| 10 | Polish: full keybind editor, settings persistence, channel transfer (`UserTransferChannelRequest`), Cash Shop migrate (existing `CashShopStage` shell hooks up to real packets), AOT publish | planned |
+| 9 | Loot: `Message(38)` decode (`IncEXP` / `IncMoney` / `DropPickUp`) → EXP / meso / item popups via `StatusMessenger`; `StatChanged(30)` HUD-total fix; `DropPickUpRequest(246)` pickup | shipped |
+| 10 | Polish: settings + keybind persistence (`%APPDATA%/MapleClaude/settings.json`), map BGM + volume, portal travel (`UserTransferFieldRequest`), channel transfer (`UserTransferChannelRequest` + `MigrateCommand`), Cash Shop migrate (`UserMigrateToCashShopRequest`). AOT stays disabled (MonoGame reflection) — ships as single self-contained `.exe` | shipped |
 
 The cosmetic UI panels added in Phase 3.5 (StatusBar gauges, MiniMap, ItemInventory grid, SkillBook tabs, etc.) currently render with placeholder/demo data; Phases 4–10 progressively wire each one to live server packets without redrawing them.
 
@@ -67,6 +67,10 @@ See `docs/roadmap.md` for the detailed roadmap and `CLAUDE.md` for the contribut
 | `ChangeSkillRecordResult(35)` / `TemporaryStatSet(31)` / `TemporaryStatReset(32)` | S→C | `src/MapleClaude.Net/Handlers/FieldHandlers.cs` → `src/MapleClaude/UI/Game/{SkillBook,BuffList}.cs` |
 | `UserChat(54)` / `GroupMessage(140)` / `Whisper(141)` / `PartyRequest(145)` / `FriendRequest(153)` | C→S | `src/MapleClaude/Stages/GameStage.cs` + `src/MapleClaude.Net/Senders/GameSender.cs` |
 | `GroupMessage(150)` / `Whisper(151)` / `PartyResult(62)` / `FriendResult(65)` | S→C | `src/MapleClaude.Net/Handlers/FieldHandlers.cs` → `src/MapleClaude/UI/Game/{ChatBar,UserList}.cs` |
+| `DropPickUpRequest(246)` | C→S | `src/MapleClaude/Stages/GameStage.cs` + `src/MapleClaude.Net/Senders/GameSender.cs` |
+| `Message(38)` (`IncEXP` / `IncMoney` / `DropPickUp`) | S→C | `src/MapleClaude.Net/Handlers/FieldHandlers.cs` → `src/MapleClaude/UI/Game/StatusMessenger.cs` |
+| `UserTransferFieldRequest(41)` / `UserTransferChannelRequest(42)` / `UserMigrateToCashShopRequest(43)` | C→S | `src/MapleClaude/Stages/{GameStage,CashShopStage}.cs` + `src/MapleClaude.Net/Senders/GameSender.cs` |
+| `MigrateCommand(16)` | S→C | `src/MapleClaude.Net/Handlers/FieldHandlers.cs` → `src/MapleClaude.Net/Session/MigrationCoordinator.cs` |
 | `AliveReq(17)` / `AliveAck(25)` | S↔C | auto-replied in both `LoginHandlers` and `FieldHandlers` |
 
 All Maple wire strings are length-prefixed LE-short + US-ASCII (not UTF-16LE). All multi-byte primitives are little-endian.

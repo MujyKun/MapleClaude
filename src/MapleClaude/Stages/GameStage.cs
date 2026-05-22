@@ -7,6 +7,7 @@ using MapleClaude.Net.Packet;
 using MapleClaude.Net.Senders;
 using MapleClaude.Map;
 using MapleClaude.Render;
+using MapleClaude.Settings;
 using MapleClaude.UI;
 using MapleClaude.UI.Game;
 using MapleClaude.Wz;
@@ -101,6 +102,7 @@ public sealed class GameStage : Stage
     private FieldScene? _field;
     private PlayerController? _physics;
     private byte _fieldKey;
+    private string _currentBgm = string.Empty;
 
     // One-shot debug-log latch for the not-yet-implemented MobMove(227)
     // outgoing path; see comment block in Update.
@@ -226,6 +228,16 @@ public sealed class GameStage : Stage
         _panels.Add(_quest);
         _panels.Add(_keyConfig);
         _panels.Add(_optionMenu);
+
+        // ── Persisted settings (keybinds + volumes) ───────────────────────────
+        // Disk bindings are applied now; a server-sent keymap (FuncKeyMappedInit)
+        // arrives later and overrides them via ApplyServerKeymap — server wins.
+        var saved = Game.Settings.Load();
+        _keyConfig.LoadBindings(ParseBindings(saved.KeyBindings));
+        _optionMenu.LoadVolumes(saved.BgmVolume, saved.SfxVolume);
+        ApplyAudioVolumes();
+        _keyConfig.OnBindingsChanged += SaveSettings;
+        _optionMenu.OnSettingsChanged += () => { SaveSettings(); ApplyAudioVolumes(); };
         _panels.Add(_charInfo);
         _panels.Add(_npcTalk);
         _panels.Add(_shop);
@@ -354,6 +366,16 @@ public sealed class GameStage : Stage
                 _messenger?.Show(LootWarningText(a.Warning), StatusMessenger.MsgColor.Orange);
             else if (a.IsMoney)
                 _messenger?.ShowLoot($"+{a.Money:N0} mesos");
+        };
+
+        // ── In-game migration (channel transfer / cash-shop return) ───────────
+        // The server replies to TransferChannel with MigrateCommand(16); reconnect
+        // to the new endpoint and re-send MigrateIn with the cached character id.
+        fh.OnMigrateCommand += (host, port) =>
+        {
+            _logger.LogInformation("MigrateCommand → reconnecting to {Host}:{Port}",
+                string.Join('.', host), port);
+            _ = Game.Migration.BeginMigrateAsync(host, port, Game.CharacterId);
         };
 
         fh.OnMobEnter += args =>
@@ -622,8 +644,18 @@ public sealed class GameStage : Stage
         {
             return;
         }
+        Game.CharacterId = args.Stat.CharacterId;
         try
         {
+            // A SetField (re)initializes the field — drop every entity from the
+            // previous map so a portal/channel transfer doesn't leak stale
+            // mobs/npcs/drops/players. The server re-sends them after SetField.
+            _mobs.Clear();
+            _controlledMobs.Clear();
+            _npcs.Clear();
+            _otherChars.Clear();
+            _drops.Clear();
+
             _field = new FieldScene(_loggerFactory.CreateLogger<FieldScene>(), _map, _loader!);
             _field.Load(args.Stat.PosMap);
             _physics = new PlayerController(_field);
@@ -640,6 +672,7 @@ public sealed class GameStage : Stage
                                 _field.Info.VRBottom - _field.Info.VRTop)
                 : _camera.MapBounds;
             PopulateInventory(args);
+            PlayMapBgm(_field.Info.Bgm);
             _logger.LogInformation("SetField processed — mapId={Map} portal={Portal} money={Money}",
                 args.Stat.PosMap, args.Stat.Portal, args.Money);
         }
@@ -647,6 +680,28 @@ public sealed class GameStage : Stage
         {
             _logger.LogError(ex, "Failed to load field {Id}", args.Stat.PosMap);
         }
+    }
+
+    // Walk-into-portal travel: if the player stands on a warp portal (one with a
+    // real target map), send UserTransferFieldRequest. The server replies with a
+    // fresh SetField for the destination map.
+    private const float PortalEnterRange = 40f;
+
+    private bool TryEnterPortal()
+    {
+        if (_field is null || _physics is null || !Game.Session.IsConnected) return false;
+        var pos = _physics.Position;
+        foreach (var portal in _field.Portals.Values)
+        {
+            if (portal.TargetMap <= 0 || portal.TargetMap == 999_999_999) continue;
+            if (Vector2.Distance(pos, portal.Position) > PortalEnterRange) continue;
+            Game.Session.Send(GameSender.TransferField(
+                _fieldKey, portal.TargetMap, portal.TargetPortal, (short)pos.X, (short)pos.Y));
+            _logger.LogInformation("Portal '{Name}' → map {Map} (portal {Tp})",
+                portal.Name, portal.TargetMap, portal.TargetPortal);
+            return true;
+        }
+        return false;
     }
 
     // ── Skills / buffs ─────────────────────────────────────────────────────────
@@ -743,6 +798,61 @@ public sealed class GameStage : Stage
 
     private static string ItemDisplayName(InventoryItem it) =>
         string.IsNullOrEmpty(it.Title) ? $"Item {it.ItemId:D7}" : it.Title;
+
+    // ── Settings persistence ────────────────────────────────────────────────────
+
+    // Persisted bindings are "<Keys>" → "<KeyAction>" name pairs; parse back to
+    // the live enum map, skipping any entry that no longer resolves.
+    private static Dictionary<Keys, KeyConfig.KeyAction> ParseBindings(Dictionary<string, string> raw)
+    {
+        var map = new Dictionary<Keys, KeyConfig.KeyAction>();
+        foreach (var (ks, vs) in raw)
+        {
+            if (Enum.TryParse<Keys>(ks, out var key) &&
+                Enum.TryParse<KeyConfig.KeyAction>(vs, out var action))
+            {
+                map[key] = action;
+            }
+        }
+        return map;
+    }
+
+    private void SaveSettings()
+    {
+        var s = Game.Settings.Load();
+        if (_keyConfig != null)
+            s.KeyBindings = _keyConfig.Bindings.ToDictionary(
+                kv => kv.Key.ToString(), kv => kv.Value.ToString());
+        if (_optionMenu != null)
+        {
+            s.BgmVolume = _optionMenu.BgmVolume;
+            s.SfxVolume = _optionMenu.SfxVolume;
+        }
+        Game.Settings.Save(s);
+    }
+
+    private void ApplyAudioVolumes()
+    {
+        if (_optionMenu is null) return;
+        Game.AudioPlayer.Volume    = _optionMenu.BgmVolume / 100f;
+        Game.AudioPlayer.SfxVolume = _optionMenu.SfxVolume / 100f;
+    }
+
+    // Resolve a map's "info/bgm" value (e.g. "Bgm00/SleepyWood") to a Sound.wz
+    // node ("Bgm00.img/SleepyWood") and loop it. No-op if the BGM is unchanged
+    // (so a same-map SetField doesn't restart the track).
+    private void PlayMapBgm(string bgm)
+    {
+        if (string.IsNullOrEmpty(bgm) || bgm == _currentBgm) return;
+        var slash = bgm.IndexOf('/');
+        if (slash <= 0) return;
+        var dir  = bgm[..slash];
+        var name = bgm[(slash + 1)..];
+        if (Game.SoundWz?.GetItem($"{dir}.img/{name}") is WzSound snd && Game.AudioPlayer.PlayLoop(snd))
+        {
+            _currentBgm = bgm;
+        }
+    }
 
     // DropPickUp warning subtypes (kinoko MessagePacket.DropPickUpMessageType):
     //   -3 CANNOT_ACQUIRE_ANY_ITEMS, -2 UNAVAILABLE_FOR_PICK_UP, -1 CANNOT_GET_ANYMORE_ITEMS.
@@ -1235,6 +1345,10 @@ public sealed class GameStage : Stage
         // F12 always opens KeyConfig (meta-key — not itself bindable)
         if (key == Keys.F12) { _keyConfig!.IsVisible = !_keyConfig.IsVisible; return; }
 
+        // Up arrow at a warp portal → travel. Jump is polled separately as a
+        // held key, so this discrete press doesn't interfere with jumping.
+        if (key == Keys.Up && TryEnterPortal()) return;
+
         // All other keys routed through KeyConfig bindings
         DispatchAction(_keyConfig!.GetAction(key));
     }
@@ -1266,8 +1380,10 @@ public sealed class GameStage : Stage
             case KeyConfig.KeyAction.Say:
             case KeyConfig.KeyAction.ToggleChat:
             case KeyConfig.KeyAction.MapleChat:      _chatBar!.IsVisible       = !_chatBar.IsVisible;        break;
-            // Cash Shop
+            // Cash Shop — request migration (same connection: server replies with
+            // SetCashShop on this socket), then open the local shell.
             case KeyConfig.KeyAction.CashShop:
+                if (Game.Session.IsConnected) Game.Session.Send(GameSender.MigrateToCashShop());
                 Game.StageDirector.Push(new CashShopStage(
                     _loggerFactory.CreateLogger<CashShopStage>(), _ui, Game.Font,
                     Game.GraphicsDevice.PresentationParameters.BackBufferWidth,

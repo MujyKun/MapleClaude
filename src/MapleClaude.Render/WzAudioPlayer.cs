@@ -21,12 +21,33 @@ public sealed class WzAudioPlayer : IDisposable
     private readonly Dictionary<WzSound, SoundEffect?> _effects = new();
     private Song? _current;
     private bool _disposed;
+    private float _bgmVolume = 0.6f;
+    private float _sfxVolume = 1.0f;
 
     public WzAudioPlayer(ILogger logger)
     {
         _logger = logger;
         _tempDir = Path.Combine(Path.GetTempPath(), "MapleClaude", "audio");
         Directory.CreateDirectory(_tempDir);
+    }
+
+    /// <summary>BGM volume, 0.0–1.0. Applied to the live track immediately.</summary>
+    public float Volume
+    {
+        get => _bgmVolume;
+        set
+        {
+            _bgmVolume = Math.Clamp(value, 0f, 1f);
+            try { MediaPlayer.Volume = _bgmVolume; }
+            catch { /* no audio device / headless */ }
+        }
+    }
+
+    /// <summary>SFX volume, 0.0–1.0. Applied per <see cref="PlayEffect"/> call.</summary>
+    public float SfxVolume
+    {
+        get => _sfxVolume;
+        set => _sfxVolume = Math.Clamp(value, 0f, 1f);
     }
 
     /// <summary>
@@ -52,7 +73,7 @@ public sealed class WzAudioPlayer : IDisposable
             }
             _current = entry.Song;
             MediaPlayer.IsRepeating = true;
-            MediaPlayer.Volume = 0.6f;
+            MediaPlayer.Volume = _bgmVolume;
             MediaPlayer.Play(_current);
             _logger.LogInformation("BGM playing: {Duration}ms", sound.DurationMs);
             return true;
@@ -88,7 +109,7 @@ public sealed class WzAudioPlayer : IDisposable
         }
         try
         {
-            effect.Play();
+            effect.Play(_sfxVolume, 0f, 0f);
             return true;
         }
         catch (Exception ex)

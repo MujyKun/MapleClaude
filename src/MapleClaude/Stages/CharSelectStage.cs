@@ -226,6 +226,7 @@ public sealed class CharSelectStage : Stage
             return;
         }
         _logger.LogInformation("SelectCharacterResult ok charId={Cid} — starting migration", args.CharacterId);
+        Game.CharacterId = args.CharacterId;
         var fieldStage = new GameStage(
             _loggerFactory.CreateLogger<GameStage>(),
             _loggerFactory, _ui, _map, _sound,

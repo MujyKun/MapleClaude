@@ -16,6 +16,11 @@ public sealed class FieldHandlers
     // ── SetField / heartbeat ──────────────────────────────────────────────────
     public event Action<SetFieldArgs>?          OnSetField;
 
+    // ── Migration (in-game channel transfer / cash-shop return) ────────────────
+    /// <summary>Server directed us to a new channel endpoint (MigrateCommand 16):
+    /// (channelHost[4], channelPort). The client reconnects and re-sends MigrateIn.</summary>
+    public event Action<byte[], ushort>?        OnMigrateCommand;
+
     // ── Stats ─────────────────────────────────────────────────────────────────
     public event Action<StatChangedArgs>?       OnStatChanged;
 
@@ -98,6 +103,7 @@ public sealed class FieldHandlers
     /// </summary>
     public void ClearAllExceptSetField()
     {
+        OnMigrateCommand      = null;
         OnStatChanged         = null;
         OnMobEnter            = null;
         OnMobLeave            = null;
@@ -132,6 +138,7 @@ public sealed class FieldHandlers
     public void Register(PacketRouter router)
     {
         router.Register(OutHeader.SetField,            (p, s) => HandleSetField(p, s));
+        router.Register(OutHeader.MigrateCommand,      (p, s) => HandleMigrateCommand(p));
         router.Register(OutHeader.AliveReq,            (p, s) => HandleAliveReq(s));
         router.Register(OutHeader.StatChanged,         (p, s) => HandleStatChanged(p));
         router.Register(OutHeader.MobEnterField,        (p, s) => HandleMobEnter(p));
@@ -159,6 +166,18 @@ public sealed class FieldHandlers
         router.Register(OutHeader.ChangeSkillRecordResult, (p, s) => HandleChangeSkillRecord(p));
         router.Register(OutHeader.TemporaryStatSet,    (p, s) => OnTemporaryStatSet?.Invoke());
         router.Register(OutHeader.TemporaryStatReset,  (p, s) => OnTemporaryStatReset?.Invoke());
+    }
+
+    // ── Migration ───────────────────────────────────────────────────────────────
+    // MigrateCommand(16): byte (1 = migrate), byte[4] channelHost, short channelPort.
+    // Sent on an in-game channel transfer (and cash-shop return). Mirrors
+    // kinoko/packet/ClientPacket.migrateCommand.
+    private void HandleMigrateCommand(InPacket p)
+    {
+        p.ReadByte();                       // 1 (migrate flag)
+        var host = p.ReadBytes(4);
+        var port = (ushort)p.ReadShort();
+        OnMigrateCommand?.Invoke(host, port);
     }
 
     // ── SetField ──────────────────────────────────────────────────────────────

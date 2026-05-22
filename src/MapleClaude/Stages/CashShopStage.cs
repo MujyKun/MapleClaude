@@ -1,4 +1,5 @@
 using MapleClaude.App;
+using MapleClaude.Net.Senders;
 using MapleClaude.Render;
 using MapleClaude.UI;
 using MapleClaude.Wz;
@@ -560,6 +561,11 @@ public sealed class CashShopStage : Stage
     private void Exit()
     {
         _logger.LogInformation("CashShopStage: exiting → pop to previous stage");
+        // Tell the server to put us back in the channel (empty TransferField body).
+        if (Game.Session.IsConnected)
+        {
+            Game.Session.Send(GameSender.ReturnFromCashShop());
+        }
         Game.StageDirector.Pop();
     }
 
