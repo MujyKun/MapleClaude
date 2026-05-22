@@ -143,6 +143,19 @@ public sealed class FieldHandlers
                     Face   = args.Stat.Face,
                     Hair   = args.Stat.Hair,
                 };
+                // CharacterData continues after the stat block (SetField uses
+                // DBChar.ALL): friendMax, linkedChar, money, inventory sizes,
+                // ext-slot expiry, then the equipped + 5 inventory tabs.
+                p.ReadByte();                       // nFriendMax
+                p.ReadBool();                       // sLinkedCharacter (bool → str=false)
+                args.Money = p.ReadInt();           // nMoney
+                p.ReadByte();                       // equip inv size
+                p.ReadByte();                       // consume inv size
+                p.ReadByte();                       // install inv size
+                p.ReadByte();                       // etc inv size
+                p.ReadByte();                       // cash inv size
+                p.ReadLong();                       // aEquipExtExpire (FileTime)
+                args.Inventory = DecodeInventory(p);
             }
             catch (Exception ex)
             {
@@ -158,6 +171,62 @@ public sealed class FieldHandlers
             p.ReadByte();       // bChaseEnable
         }
         OnSetField?.Invoke(args);
+    }
+
+    // CharacterData inventory section (DBChar.ITEMSLOT*). The equip section has
+    // 5 short-terminated sub-loops (normal-equipped, cash-equipped, equip-tab,
+    // dragon, mechanic); the consume/install/etc/cash tabs are byte-terminated.
+    private static Dictionary<InventoryType, List<(short, InventoryItem)>> DecodeInventory(InPacket p)
+    {
+        var inv = new Dictionary<InventoryType, List<(short, InventoryItem)>>();
+        var equipped = new List<(short, InventoryItem)>();
+        var equipTab = new List<(short, InventoryItem)>();
+
+        // ITEMSLOTEQUIP — normal equipped (worn).
+        short pos;
+        while ((pos = p.ReadShort()) != 0)
+        {
+            equipped.Add((pos, ItemDecoder.Decode(p)));
+        }
+        // cash-equipped (body part - 1000).
+        while ((pos = p.ReadShort()) != 0)
+        {
+            equipped.Add((pos, ItemDecoder.Decode(p)));
+        }
+        // equip inventory tab.
+        while ((pos = p.ReadShort()) != 0)
+        {
+            equipTab.Add((pos, ItemDecoder.Decode(p)));
+        }
+        // dragon equips.
+        while (p.ReadShort() != 0)
+        {
+            ItemDecoder.Decode(p);
+        }
+        // mechanic equips.
+        while (p.ReadShort() != 0)
+        {
+            ItemDecoder.Decode(p);
+        }
+
+        inv[InventoryType.Equipped] = equipped;
+        inv[InventoryType.Equip]    = equipTab;
+        inv[InventoryType.Consume]  = DecodeByteTab(p);
+        inv[InventoryType.Install]  = DecodeByteTab(p);
+        inv[InventoryType.Etc]      = DecodeByteTab(p);
+        inv[InventoryType.Cash]     = DecodeByteTab(p);
+        return inv;
+    }
+
+    private static List<(short, InventoryItem)> DecodeByteTab(InPacket p)
+    {
+        var list = new List<(short, InventoryItem)>();
+        byte slot;
+        while ((slot = p.ReadByte()) != 0)
+        {
+            list.Add((slot, ItemDecoder.Decode(p)));
+        }
+        return list;
     }
 
     private void HandleAliveReq(ClientSession session)
@@ -432,28 +501,31 @@ public sealed class FieldHandlers
     // WvsContext.inventoryOperation:
     //   byte exclRequest, byte opCount, [opType(byte) invType(byte) pos(short) + type-specific], byte 0
 
+    // WvsContext.inventoryOperation: byte exclRequest, byte count,
+    // per op { byte opType, byte invType, short pos, payload }, byte bSN.
+    // opType: 0=NewItem 1=ItemNumber 2=Position 3=DelItem 4=EXP.
+    // invType: 0=Equipped 1=Equip 2=Consume 3=Install 4=Etc 5=Cash.
     private void HandleInventoryOp(InPacket p)
     {
-        p.ReadByte();    // exclRequest
+        p.ReadByte();    // bExclRequestSent
         var count = p.ReadByte();
         var ops   = new List<InventoryOpArg>(count);
         for (var i = 0; i < count; i++)
         {
-            var opType  = p.ReadByte();   // 0=New 1=Qty 2=Move 3=Del 4=Exp
-            var invType = p.ReadByte();   // 0=Equip 1=Consume 2=Install 3=Etc 4=Cash
+            var opType  = p.ReadByte();
+            var invType = (InventoryType)p.ReadByte();
             var pos     = p.ReadShort();
             var op      = new InventoryOpArg { OpType = opType, InvType = invType, Pos = pos };
             switch (opType)
             {
-                case 0: // NewItem — read item (minimal: int itemId, byte isCash, long expiry, …)
-                    op.ItemId = p.ReadInt();
-                    // Skip item detail (too complex to decode fully without item schema)
-                    // Just log and continue
+                case 0: // NewItem — full item slot
+                    op.Item   = ItemDecoder.Decode(p);
+                    op.ItemId = op.Item.ItemId;
                     break;
-                case 1: // ItemNumber — short quantity
+                case 1: // ItemNumber — new quantity
                     op.Quantity = p.ReadShort();
                     break;
-                case 2: // Position — short newPos
+                case 2: // Position — new slot
                     op.NewPos = p.ReadShort();
                     break;
                 case 3: // DelItem — nothing extra
@@ -609,6 +681,11 @@ public sealed class SetFieldArgs
     public AvatarLook? Look { get; set; }
     public int PosMap { get; set; }
     public byte Portal { get; set; }
+    public int Money { get; set; }
+    /// <summary>Initial inventory delivered in CharacterData (null if it wasn't decoded).
+    /// Keyed by <see cref="MapleClaude.Domain.InventoryType"/>; positions are 1-based
+    /// (negative for equipped body parts).</summary>
+    public Dictionary<InventoryType, List<(short pos, InventoryItem item)>>? Inventory { get; set; }
 }
 
 public sealed class StatChangedArgs
@@ -663,12 +740,13 @@ public sealed class DropLeaveArgs { public int DropId; public byte LeaveType; }
 
 public sealed class InventoryOpArg
 {
-    public byte  OpType;   // 0=New 1=Qty 2=Move 3=Del 4=Exp
-    public byte  InvType;  // 0=Equip 1=Consume 2=Install 3=Etc 4=Cash
-    public short Pos;
-    public int   ItemId;
-    public short Quantity;
-    public short NewPos;
+    public byte           OpType;   // 0=New 1=Qty 2=Move 3=Del 4=Exp
+    public InventoryType  InvType;  // 0=Equipped 1=Equip 2=Consume 3=Install 4=Etc 5=Cash
+    public short          Pos;
+    public int            ItemId;
+    public short          Quantity;
+    public short          NewPos;
+    public InventoryItem? Item;     // populated for NewItem (op 0)
 }
 
 public sealed class UserChatArgs   { public int CharId; public string Text = string.Empty; }

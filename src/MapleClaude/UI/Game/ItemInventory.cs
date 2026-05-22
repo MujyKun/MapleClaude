@@ -24,6 +24,7 @@ public sealed class ItemInventory : GamePanel
         public string Name     = string.Empty;
         public int    Quantity = 1;
         public int    Tab;        // 0=Equip 1=Use 2=Setup 3=Etc 4=Cash
+        public int    Slot;       // 1-based inventory slot position
     }
 
     // ── Layout ─────────────────────────────────────────────────────────────────
@@ -105,6 +106,53 @@ public sealed class ItemInventory : GamePanel
     public void RemoveItem(int id) => _items.RemoveAll(i => i.Id == id);
     public void Clear() => _items.Clear();
 
+    /// <summary>Remove all server-driven items (used before loading a fresh inventory).</summary>
+    public void ClearAll() => _items.Clear();
+
+    /// <summary>Insert or replace the item occupying (tab, slot).</summary>
+    public void SetSlot(int tab, int slot, InvItem item)
+    {
+        item.Tab = tab;
+        item.Slot = slot;
+        _items.RemoveAll(i => i.Tab == tab && i.Slot == slot);
+        _items.Add(item);
+    }
+
+    public void RemoveSlot(int tab, int slot) =>
+        _items.RemoveAll(i => i.Tab == tab && i.Slot == slot);
+
+    public void SetSlotQuantity(int tab, int slot, int qty)
+    {
+        var it = _items.FirstOrDefault(i => i.Tab == tab && i.Slot == slot);
+        if (it != null)
+        {
+            it.Quantity = qty;
+        }
+    }
+
+    /// <summary>Move the item at (tab, fromSlot) to toSlot (0 = removed/dropped).</summary>
+    public void MoveSlot(int tab, int fromSlot, int toSlot)
+    {
+        var it = _items.FirstOrDefault(i => i.Tab == tab && i.Slot == fromSlot);
+        if (it == null)
+        {
+            return;
+        }
+        if (toSlot == 0)
+        {
+            _items.Remove(it);
+            return;
+        }
+        _items.RemoveAll(i => i.Tab == tab && i.Slot == toSlot);
+        it.Slot = toSlot;
+    }
+
+    /// <summary>Find the item at (tab, slot), or null.</summary>
+    public InvItem? ItemAt(int tab, int slot) =>
+        _items.FirstOrDefault(i => i.Tab == tab && i.Slot == slot);
+
+    public int ActiveTab => _activeTab;
+
     // ── Update ─────────────────────────────────────────────────────────────────
 
     public override void Update(GameTime gt)
@@ -157,7 +205,7 @@ public sealed class ItemInventory : GamePanel
         }
 
         // Item grid
-        var tabItems = _items.Where(it => it.Tab == _activeTab).ToList();
+        var tabItems = _items.Where(it => it.Tab == _activeTab).OrderBy(it => it.Slot).ToList();
         var scroll = _scrollOffset[_activeTab];
 
         for (var r = 0; r < Rows; r++)
@@ -233,11 +281,38 @@ public sealed class ItemInventory : GamePanel
 
     // ── Input ──────────────────────────────────────────────────────────────────
 
+    /// <summary>Raised on a double-click of an occupied slot: (tab, slot, itemId).
+    /// GameStage decides whether to use (consume tab) or equip (equip tab).</summary>
+    public Action<int, int, int>? OnItemActivate { get; set; }
+
+    private double _lastClickTime;
+    private InvItem? _lastClickItem;
+
     public override bool HandleMouseButton(int x, int y, bool down)
     {
         if (!IsVisible) return false;
         foreach (var b in _allButtons)
             if (b.HandleMouseButton(x, y, down)) return true;
+
+        if (down)
+        {
+            var hit = HitTestItem(x, y);
+            if (hit != null)
+            {
+                var now = Environment.TickCount64 / 1000.0;
+                if (ReferenceEquals(hit, _lastClickItem) && now - _lastClickTime < 0.4)
+                {
+                    OnItemActivate?.Invoke(hit.Tab, hit.Slot, hit.Id);
+                    _lastClickItem = null;
+                }
+                else
+                {
+                    _lastClickItem = hit;
+                    _lastClickTime = now;
+                }
+                return true;
+            }
+        }
 
         var titleBar = new Rectangle((int)Position.X, (int)Position.Y, PanelW, 22);
         if (down && titleBar.Contains(x, y))
@@ -253,7 +328,7 @@ public sealed class ItemInventory : GamePanel
     {
         if (!IsVisible) return false;
         if (key == Keys.Escape) { IsVisible = false; return true; }
-        var tabItems = _items.Where(it => it.Tab == _activeTab).ToList();
+        var tabItems = _items.Where(it => it.Tab == _activeTab).OrderBy(it => it.Slot).ToList();
         var maxScroll = Math.Max(0, (tabItems.Count + Cols - 1) / Cols - Rows);
         if (key == Keys.PageDown) { _scrollOffset[_activeTab] = Math.Min(_scrollOffset[_activeTab] + 1, maxScroll); return true; }
         if (key == Keys.PageUp)   { _scrollOffset[_activeTab] = Math.Max(0, _scrollOffset[_activeTab] - 1); return true; }
@@ -270,7 +345,7 @@ public sealed class ItemInventory : GamePanel
 
     private InvItem? HitTestItem(int x, int y)
     {
-        var tabItems = _items.Where(it => it.Tab == _activeTab).ToList();
+        var tabItems = _items.Where(it => it.Tab == _activeTab).OrderBy(it => it.Slot).ToList();
         var scroll   = _scrollOffset[_activeTab];
         for (var r = 0; r < Rows; r++)
         for (var c = 0; c < Cols; c++)

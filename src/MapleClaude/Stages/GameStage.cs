@@ -1,5 +1,6 @@
 using MapleClaude.App;
 using MapleClaude.Character;
+using MapleClaude.Domain;
 using MapleClaude.Net;
 using MapleClaude.Net.Handlers;
 using MapleClaude.Net.Packet;
@@ -169,6 +170,7 @@ public sealed class GameStage : Stage
         _buffList = new BuffList(_loader, _ui, font) { IsVisible = true };
         _equip = new EquipInventory(_loader, _ui, font);
         _item = new ItemInventory(_loader, _ui, font);
+        _item.OnItemActivate = OnInventoryItemActivate;
         _skill = new SkillBook(_loader, _ui, font);
         _stats = new StatsInfo(_loader, _ui, font);
         _quest = new QuestLog(_loader, _ui, font);
@@ -434,20 +436,36 @@ public sealed class GameStage : Stage
         {
             foreach (var op in ops)
             {
-                // 0=Equip 1=Consume 2=Install 3=Etc 4=Cash → panel tab 0-4
+                var tab = InvTypeToTab(op.InvType);
                 switch (op.OpType)
                 {
-                    case 0: // NewItem
-                        _item?.AddItem(new ItemInventory.InvItem
+                    case 0: // NewItem — full item slot
+                        if (op.Item is null) break;
+                        if (op.InvType == InventoryType.Equipped)
                         {
-                            Id = op.ItemId, Name = $"Item {op.ItemId:D7}",
-                            Quantity = 1, Tab = op.InvType,
-                        });
-                        _messenger?.ShowLoot($"Item {op.ItemId}");
+                            _equip?.SetEquipped(op.Pos, ItemDisplayName(op.Item));
+                        }
+                        else if (tab >= 0)
+                        {
+                            _item?.SetSlot(tab, op.Pos, ToInvItem(op.Item, tab, op.Pos));
+                        }
+                        _messenger?.ShowLoot(ItemDisplayName(op.Item));
                         break;
-                    case 3: // DelItem — remove from correct slot/tab
+                    case 1: // ItemNumber — quantity changed
+                        if (tab >= 0) _item?.SetSlotQuantity(tab, op.Pos, op.Quantity);
                         break;
-                    case 1: // Qty update
+                    case 2: // Position — move (NewPos 0 = removed from this tab)
+                        if (op.InvType == InventoryType.Equipped || op.Pos < 0 || op.NewPos < 0)
+                        {
+                            // Equip/unequip move — equipped panel + avatar refresh come via
+                            // separate packets; the stat change arrives via StatChanged.
+                            break;
+                        }
+                        if (tab >= 0) _item?.MoveSlot(tab, op.Pos, op.NewPos);
+                        break;
+                    case 3: // DelItem
+                        if (op.InvType == InventoryType.Equipped) _equip?.RemoveEquipped(op.Pos);
+                        else if (tab >= 0)                        _item?.RemoveSlot(tab, op.Pos);
                         break;
                 }
             }
@@ -554,12 +572,111 @@ public sealed class GameStage : Stage
                                 _field.Info.VRRight - _field.Info.VRLeft,
                                 _field.Info.VRBottom - _field.Info.VRTop)
                 : _camera.MapBounds;
-            _logger.LogInformation("SetField processed — mapId={Map} portal={Portal}",
-                args.Stat.PosMap, args.Stat.Portal);
+            PopulateInventory(args);
+            _logger.LogInformation("SetField processed — mapId={Map} portal={Portal} money={Money}",
+                args.Stat.PosMap, args.Stat.Portal, args.Money);
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Failed to load field {Id}", args.Stat.PosMap);
+        }
+    }
+
+    // Double-click in the item grid: use a consumable, or equip an equip.
+    private void OnInventoryItemActivate(int tab, int slot, int itemId)
+    {
+        if (!Game.Session.IsConnected)
+        {
+            return;
+        }
+        switch (tab)
+        {
+            case 0: // Equip tab → equip to its body part (negative dest slot).
+                var bodyPart = EquipBodyPart(itemId);
+                if (bodyPart != 0)
+                {
+                    Game.Session.Send(GameSender.ChangeSlotPosition(
+                        InventoryType.Equip, (short)slot, (short)-bodyPart, 1));
+                }
+                break;
+            case 1: // Use tab → consume (potion etc.); the server echoes StatChanged.
+                Game.Session.Send(GameSender.UseItem((short)slot, itemId));
+                break;
+        }
+    }
+
+    // v95 equip item id → equipped body part. 0 = not a known equip slot.
+    private static int EquipBodyPart(int itemId)
+    {
+        var cat = itemId / 10000;
+        return cat switch
+        {
+            100 => 1,   // Hat
+            101 => 2,   // Face acc
+            102 => 3,   // Eye acc
+            103 => 4,   // Earring
+            104 => 5,   // Top
+            105 => 5,   // Overall
+            106 => 6,   // Bottom
+            107 => 7,   // Shoes
+            108 => 8,   // Gloves
+            109 => 10,  // Shield
+            110 => 9,   // Cape
+            111 => 12,  // Ring
+            112 => 17,  // Pendant
+            113 => 49,  // Belt
+            114 => 50,  // Medal
+            _   => (itemId / 1_000_000 == 1 && cat is >= 130 and <= 170) ? 11 : 0, // Weapon
+        };
+    }
+
+    // 5 item tabs map to ItemInventory tab indices; Equipped(0) goes to the
+    // equip panel, not the item grid.
+    private static int InvTypeToTab(InventoryType t) => t switch
+    {
+        InventoryType.Equip   => 0,
+        InventoryType.Consume => 1,
+        InventoryType.Install => 2,
+        InventoryType.Etc     => 3,
+        InventoryType.Cash    => 4,
+        _                     => -1, // Equipped
+    };
+
+    private static string ItemDisplayName(InventoryItem it) =>
+        string.IsNullOrEmpty(it.Title) ? $"Item {it.ItemId:D7}" : it.Title;
+
+    private ItemInventory.InvItem ToInvItem(InventoryItem it, int tab, int slot) => new()
+    {
+        Id = it.ItemId,
+        Name = ItemDisplayName(it),
+        Quantity = it.Type == InvItemType.Bundle ? it.Quantity : 1,
+        Tab = tab,
+        Slot = slot,
+    };
+
+    /// <summary>Load the initial inventory delivered in SetField's CharacterData.</summary>
+    private void PopulateInventory(SetFieldArgs args)
+    {
+        if (args.Inventory is null)
+        {
+            return;
+        }
+        _item?.ClearAll();
+        _equip?.ClearEquipped();
+        foreach (var (invType, items) in args.Inventory)
+        {
+            var tab = InvTypeToTab(invType);
+            foreach (var (pos, item) in items)
+            {
+                if (invType == InventoryType.Equipped)
+                {
+                    _equip?.SetEquipped(pos, ItemDisplayName(item));
+                }
+                else if (tab >= 0)
+                {
+                    _item?.SetSlot(tab, pos, ToInvItem(item, tab, pos));
+                }
+            }
         }
     }
 

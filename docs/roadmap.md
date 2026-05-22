@@ -91,13 +91,25 @@ effects fire. No disconnect.
 `ASKQUIZ`/`ASKSPEEDQUIZ` (unsupported by the v95 server); NPC shops
 (`OpenShopDlg`/`ShopResult`/`UserShopRequest`) → Phase 6.
 
-## Phase 6 — Inventory & items
+## Phase 6 — Inventory & items (shipped)
 
-**Scope.** Inventory tabs (equip/use/setup/etc/cash), drag/drop,
-`InventoryOperation` packet decoding, equip swap with stat updates,
-tooltip widget. Cash shop UI shell (no real transactions).
+**Scope.** Full `GW_ItemSlot*` decode (`ItemDecoder` — equip stat block,
+bundle quantity, pet) mirroring upstream `Item.encode`. Initial inventory
+parsed from `SetField`'s `CharacterData` (equipped + 5 tabs) and loaded into
+the `ItemInventory` / `EquipInventory` panels. Live `InventoryOperation(28)`
+updates (NewItem with full item / ItemNumber / Position / DelItem) applied to
+the slot-indexed panels. Double-click to use a consumable
+(`UserStatChangeItemUseRequest(78)`) or equip an equip item by computed body
+part (`UserChangeSlotPositionRequest(77)`); `UserDropMoneyRequest(106)`.
 
-**Exit criteria.** Pick up an item; equip it; see stats change; drop it.
+**Exit criteria.** Pick up an item (live `InventoryOperation`); equip it
+(double-click → the server recalculates and echoes `StatChanged`, the stat
+panel updates); drop money. No disconnect.
+
+**Deferred:** in-grid item drag/drop reordering + drag-to-drop (the move op is
+applied when the server sends it; client-initiated drag is a later UI pass);
+String.wz item-name lookup (panels show the wire title or a formatted id);
+NPC shops (`OpenShopDlg`/`UserShopRequest`).
 
 ## Phase 7 — Skills, jobs, buffs
 
