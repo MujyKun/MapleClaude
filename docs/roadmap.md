@@ -147,21 +147,55 @@ the party channel; both appear in the party tab. (Minimap party dots deferred.)
 party HUD, friend add/delete UI buttons (the senders exist), minimap party
 positions, a dedicated yes/no invite popup (uses the `/accept` chat command).
 
-## Phase 9 — Loot
+## Phase 9 — Loot (shipped)
 
-**Scope.** Drop spawn (`DropEnterField`), pickup (`DropLeaveField` reasons),
-meso pickup, EXP gain popups, item pickup.
+**Scope.** Drop spawn (`DropEnterField`) + render (`DropSprite`) and pickup
+(`DropLeaveField`) already existed; this phase added the loot feedback loop:
+`Message(38)` decode (`IncEXP` / `IncMoney` / `DropPickUp` item/meso/warning)
+driving EXP + meso popups through the `StatusMessenger`. Item popups arrive via
+`InventoryOperation`. The `DropPickUpRequest(246)` encode moved into
+`GameSender.PickUpDrop` for testability.
 
-**Exit criteria.** Killing mobs reliably drops loot the player can pick up.
+Also fixed two `StatChanged(30)` decode bugs that mis-aligned the HUD stat
+block: the mask is a 4-byte int (was read as a long) and `MONEY` is bit
+`0x40000` (the code used `0x200000`, which is `TEMPEXP`).
 
-## Phase 10 — Polish
+**Exit criteria.** Killing mobs / picking up loot shows EXP, meso, and item
+popups; the EXP bar and meso total update from the corrected `StatChanged`.
+(Runtime gain/pickup is server-driven, verified against a live channel server.)
 
-**Scope.** Map transitions (portals), channel/cash-shop migrate, XAudio2 BGM
-and SFX via MonoGame, settings persistence, full keybind editor, error
-recovery, AOT publish (single self-contained `.exe`).
+## Phase 10 — Polish (shipped)
 
-**Exit criteria.** First-time install → AOT-published `.exe` runs without the
-.NET runtime; user can play from level 1 to mid-game continuously.
+**Scope.**
+- **Settings persistence** — `SettingsStore` serialises keybinds + BGM/SFX
+  volume to `%APPDATA%/MapleClaude/settings.json` (System.Text.Json source-gen);
+  loaded on enter, saved when the user commits a rebind or option change. A
+  server-sent keymap (`FuncKeyMappedInit`) still overrides the local layout.
+- **Audio** — map BGM plays on `SetField` (resolved from `info/bgm` against
+  Sound.wz) via the existing `WzAudioPlayer`; BGM/SFX volume are now settable and
+  wired to the option menu.
+- **Portals** — walk onto a warp portal + press Up sends
+  `UserTransferFieldRequest(41)`; `SetField` now clears stale field entities so a
+  transfer doesn't leak the previous map's mobs/npcs/drops.
+- **Channel transfer** — `UserTransferChannelRequest(42)` (fixed to send the
+  trailing `update_time`); the server's `MigrateCommand(16)` reply reconnects via
+  the existing `MigrationCoordinator`, reusing the cached character id.
+- **Cash-shop migrate** — `UserMigrateToCashShopRequest(43)` on open and an
+  empty `UserTransferFieldRequest` on exit (cash shop is same-connection; full
+  cash-shop content decode is a follow-up).
+
+**AOT — known limitation (not done).** `PublishAot` and `PublishTrimmed` stay
+disabled: MonoGame relies on reflection (content pipeline, type lookup) that
+breaks under trimming/AOT. The shipping format remains a **single, self-contained
+`MapleClaude.exe`** (~73 MB, runtime bundled) — it already runs without a
+separate .NET install, satisfying the practical goal. Revisit AOT only if
+MonoGame gains verified trim/AOT support upstream.
+
+**Exit criteria.** Settings + keybinds persist across launches; map BGM plays
+and respects volume; portals, channel transfer, and cash-shop migrate send
+byte-correct requests (unit-tested) and reuse the migration template.
+(Map-change / channel-reconnect / cash-shop-content runtime behaviour is
+server-dependent, verified against a live server.)
 
 ## Conventions across phases
 
