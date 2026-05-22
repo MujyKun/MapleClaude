@@ -18,7 +18,7 @@ MapleClaude is a brand-new client written in C# 13 / .NET 10 with MonoGame for r
 | 5 | NPCs: `NpcEnterField` render, click-to-talk + Interact key (`UserSelectNpc`), `ScriptMessage` decode (say/menu/yes-no/text/number) + `UserScriptMessageAnswer` | shipped |
 | 6 | Inventory: full `Item`/`ItemSlot` decode, initial inventory from `SetField` `CharacterData`, live `InventoryOperation(28)` updates, double-click to use/equip (`UserStatChangeItemUseRequest` / `UserChangeSlotPositionRequest`), drop money | shipped |
 | 7 | Skills + buffs: `SkillBook` driven by `CharacterData` skill records + `ChangeSkillRecordResult`, SP-up + double-click cast (`UserSkillUpRequest` / `UserSkillUseRequest`), optimistic `BuffList` HUD + `TemporaryStatReset` clear | shipped |
-| 8 | Social: drive the existing `ChatBar` / `UserList` / `Messenger` UIs from real `UserChat` / `FriendResult` / `PartyResult` / `GuildResult` packets | planned |
+| 8 | Social: map chat + party/buddy/guild chat (`GroupMessage`) + whisper in `ChatBar`; party (`PartyResult`/`PartyRequest`, invite→`/accept`) + friends (`FriendResult`/`FriendRequest`) in `UserList`; chat commands (`/w` `/p` `/invite` `/accept` `/leave`) | shipped |
 | 9 | Drops, pickup, EXP / meso popups (already-built `StatusMessenger` UI hooks up to `DropEnterField` and stat-change packets) | planned |
 | 10 | Polish: full keybind editor, settings persistence, channel transfer (`UserTransferChannelRequest`), Cash Shop migrate (existing `CashShopStage` shell hooks up to real packets), AOT publish | planned |
 
@@ -40,6 +40,7 @@ See `docs/roadmap.md` for the detailed roadmap and `CLAUDE.md` for the contribut
 | Interact key (configurable via `KeyConfig`) / click an NPC | Talk to the nearest/clicked NPC (`UserSelectNpc`) |
 | Double-click an item (inventory panel) | Use a consumable, or equip an equip item |
 | Double-click a skill (skill book) | Cast a learned active skill (`UserSkillUseRequest`) |
+| Chat commands | `/w <name> <msg>` whisper · `/p <msg>` party chat · `/invite <name>` · `/accept` · `/create` · `/leave` |
 | Ctrl+A / Ctrl+C / Ctrl+V / Ctrl+X | Select all / copy / paste / cut in text input fields (login ID, character name) |
 | Right Alt | Toggle Korean IME Hangul ↔ English mode when Korean is the active Windows input language |
 
@@ -64,6 +65,8 @@ See `docs/roadmap.md` for the detailed roadmap and `CLAUDE.md` for the contribut
 | `UserChangeSlotPositionRequest(77)` / `UserStatChangeItemUseRequest(78)` / `UserDropMoneyRequest(106)` | C→S | `src/MapleClaude/Stages/GameStage.cs` + `src/MapleClaude/Net/Senders/GameSender.cs` |
 | `UserSkillUpRequest(102)` / `UserSkillUseRequest(103)` | C→S | `src/MapleClaude/Stages/GameStage.cs` + `src/MapleClaude/Net/Senders/GameSender.cs` |
 | `ChangeSkillRecordResult(35)` / `TemporaryStatSet(31)` / `TemporaryStatReset(32)` | S→C | `src/MapleClaude.Net/Handlers/FieldHandlers.cs` → `src/MapleClaude/UI/Game/{SkillBook,BuffList}.cs` |
+| `UserChat(54)` / `GroupMessage(140)` / `Whisper(141)` / `PartyRequest(145)` / `FriendRequest(153)` | C→S | `src/MapleClaude/Stages/GameStage.cs` + `src/MapleClaude.Net/Senders/GameSender.cs` |
+| `GroupMessage(150)` / `Whisper(151)` / `PartyResult(62)` / `FriendResult(65)` | S→C | `src/MapleClaude.Net/Handlers/FieldHandlers.cs` → `src/MapleClaude/UI/Game/{ChatBar,UserList}.cs` |
 | `AliveReq(17)` / `AliveAck(25)` | S↔C | auto-replied in both `LoginHandlers` and `FieldHandlers` |
 
 All Maple wire strings are length-prefixed LE-short + US-ASCII (not UTF-16LE). All multi-byte primitives are little-endian.

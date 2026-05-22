@@ -109,6 +109,13 @@ public sealed class GameStage : Stage
     // Active NPC-dialog message type — answers must echo the type the server sent.
     private ScriptMessageType _dialogMsgType;
 
+    // Social state. Party member ids are cached from the last PartyResult so /p
+    // (party chat) can address them; a pending invite lets /accept join.
+    private readonly List<int> _partyMemberIds = new();
+    private int _pendingInviterId;
+    private bool _hasPendingInvite;
+    private string _myName = "Hero";
+
     // Melee attack pacing.
     private float _attackCooldown;
     private const float AttackCooldownSeconds = 0.6f;
@@ -231,12 +238,8 @@ public sealed class GameStage : Stage
         _messenger     = new StatusMessenger(font) { Position = new Vector2(10, 340) };
         _dmgNumbers    = new DamageNumber(font);
 
-        _statusBar.OnCommunity = () => _userList!.IsVisible = !_userList.IsVisible;
-        _chatBar!.OnSendChat = msg =>
-        {
-            if (Game.Session.IsConnected)
-                Game.Session.Send(GameSender.UserChat(msg));
-        };
+        _statusBar.OnCommunity = ToggleCommunityPanel;
+        _chatBar!.OnSendChat = OnChatSubmit;
 
         _channelSelect.OnChannelChange = ch =>
             _logger.LogInformation("Channel change requested: CH{Ch} — no packet yet", ch);
@@ -257,6 +260,7 @@ public sealed class GameStage : Stage
         _netHandler.OnStatChanged = stats =>
         {
             _charStats = stats;
+            if (!string.IsNullOrEmpty(stats.Name)) _myName = stats.Name;
             // Feed to UI panels
             if (_stats != null)
             {
@@ -287,12 +291,6 @@ public sealed class GameStage : Stage
             if (_skill != null) _skill.SP = stats.SP;
             if (stats.Level > 0)
                 _messenger?.ShowLevelUp(stats.Level);
-        };
-
-        _netHandler.OnUserChat = (name, text, type) =>
-        {
-            var prefix = string.IsNullOrEmpty(name) ? string.Empty : $"[{name}] ";
-            _chatBar?.AddLine(prefix + text);
         };
 
         _netHandler.OnFuncKeyInit = _ =>
@@ -479,7 +477,60 @@ public sealed class GameStage : Stage
         };
 
         fh.OnUserChat += args =>
-            _chatBar?.AddLine($"[{args.CharId}] {args.Text}");
+        {
+            // The wire packet carries only the speaker's char id; resolve a
+            // display name from the other-char roster, falling back to our own
+            // name (the server echoes our map chat back to us).
+            var speaker = _otherChars.TryGetValue(args.CharId, out var oc) && !string.IsNullOrEmpty(oc.Name)
+                ? oc.Name
+                : _myName;
+            _chatBar?.AddLine($"{speaker} : {args.Text}");
+        };
+
+        // ── Social: group chat / whisper / party / friends ────────────────────
+        fh.OnGroupMessage += (type, from, text) =>
+            _chatBar?.AddLine($"[{GroupPrefix(type)}] {from} : {text}", GroupColor(type));
+
+        fh.OnWhisper += (from, ch, text) =>
+            _chatBar?.AddLine($"[whisper] {from} : {text}", new Color(220, 150, 220));
+
+        fh.OnFriendList += list =>
+        {
+            _userList!.ClearFriends();
+            foreach (var f in list)
+            {
+                _userList.AddFriend(new UserList.FriendEntry
+                {
+                    Name     = f.Name,
+                    Level    = 0,
+                    Job      = string.Empty,
+                    Online   = f.Online,
+                    Location = f.Online ? $"Ch {f.Channel + 1}" : "Offline",
+                });
+            }
+            _logger.LogInformation("Friend list loaded: {Count} friend(s)", list.Count);
+        };
+
+        fh.OnPartyLoad += (members, bossId) =>
+        {
+            _partyMemberIds.Clear();
+            _partyMemberIds.AddRange(members.Select(m => m.CharId));
+            _userList!.SetParty(members.Select(m => new UserList.PartyEntry
+            {
+                Name  = m.Name,
+                Level = m.Level,
+                Job   = JobName(m.Job),
+                HpPct = 100,
+            }));
+            _logger.LogInformation("Party loaded: {Count} member(s) boss={Boss}", members.Count, bossId);
+        };
+
+        fh.OnPartyInvite += (inviterId, name) =>
+        {
+            _pendingInviterId = inviterId;
+            _hasPendingInvite = true;
+            _chatBar?.AddLine($"{name} invited you to a party — type /accept", new Color(150, 220, 150));
+        };
 
         fh.OnScriptMessage += args =>
         {
@@ -1018,6 +1069,136 @@ public sealed class GameStage : Stage
             Game.Session.Send(p);
         }
     }
+
+    // ── Social helpers ──────────────────────────────────────────────────────────
+
+    /// <summary>Open/close the community (friends/party/guild) panel. Loads the
+    /// friend list from the server the moment the panel is opened.</summary>
+    private void ToggleCommunityPanel()
+    {
+        if (_userList is null)
+        {
+            return;
+        }
+        _userList.IsVisible = !_userList.IsVisible;
+        if (_userList.IsVisible)
+        {
+            SendIfConnected(GameSender.FriendLoad());
+        }
+    }
+
+    /// <summary>Parse a chat-bar submission for slash commands; anything else is
+    /// ordinary map chat. The ChatBar already echoed the raw line locally, so
+    /// command lines are removed from the log and replaced with their result.</summary>
+    private void OnChatSubmit(string line)
+    {
+        if (string.IsNullOrWhiteSpace(line))
+        {
+            return;
+        }
+
+        if (TryConsumeCommand(line, "/w ", out var whisperRest) ||
+            TryConsumeCommand(line, "/whisper ", out whisperRest))
+        {
+            var (target, message) = SplitFirstToken(whisperRest);
+            if (target.Length > 0 && message.Length > 0)
+            {
+                SendIfConnected(GameSender.Whisper(target, message));
+                _chatBar?.AddLine($"[whisper to {target}] {message}", new Color(200, 140, 200));
+            }
+            return;
+        }
+
+        if (TryConsumeCommand(line, "/p ", out var partyRest))
+        {
+            if (_partyMemberIds.Count == 0)
+            {
+                _chatBar?.AddLine("You are not in a party.", new Color(220, 120, 120));
+                return;
+            }
+            SendIfConnected(GameSender.GroupChat(GameSender.ChatGroupType.Party, _partyMemberIds, partyRest));
+            _chatBar?.AddLine($"[Party] {_myName} : {partyRest}", GroupColor((int)GameSender.ChatGroupType.Party));
+            return;
+        }
+
+        if (TryConsumeCommand(line, "/invite ", out var inviteName))
+        {
+            var (name, _) = SplitFirstToken(inviteName);
+            if (name.Length > 0)
+            {
+                SendIfConnected(GameSender.PartyInvite(name));
+            }
+            return;
+        }
+
+        if (line.StartsWith("/accept", StringComparison.OrdinalIgnoreCase))
+        {
+            if (_hasPendingInvite)
+            {
+                SendIfConnected(GameSender.PartyJoin(_pendingInviterId));
+                _hasPendingInvite = false;
+            }
+            else
+            {
+                _chatBar?.AddLine("No pending party invite.", new Color(220, 120, 120));
+            }
+            return;
+        }
+
+        if (line.StartsWith("/create", StringComparison.OrdinalIgnoreCase))
+        {
+            SendIfConnected(GameSender.PartyCreate());
+            return;
+        }
+
+        if (line.StartsWith("/leave", StringComparison.OrdinalIgnoreCase))
+        {
+            SendIfConnected(GameSender.PartyLeave());
+            return;
+        }
+
+        // Plain map chat.
+        SendIfConnected(GameSender.UserChat(line));
+    }
+
+    // Returns true and the remainder (trimmed of the prefix) when line starts
+    // with prefix (case-insensitive). rest is "" when it doesn't match.
+    private static bool TryConsumeCommand(string line, string prefix, out string rest)
+    {
+        if (line.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+        {
+            rest = line[prefix.Length..].Trim();
+            return true;
+        }
+        rest = string.Empty;
+        return false;
+    }
+
+    private static (string token, string remainder) SplitFirstToken(string s)
+    {
+        s = s.Trim();
+        var sp = s.IndexOf(' ');
+        return sp < 0 ? (s, string.Empty) : (s[..sp], s[(sp + 1)..].Trim());
+    }
+
+    // ChatGroupType → display prefix / colour. 0=Buddy 1=Party 2=Guild 3=Alliance.
+    private static string GroupPrefix(int groupType) => groupType switch
+    {
+        0 => "Buddy",
+        1 => "Party",
+        2 => "Guild",
+        3 => "Alliance",
+        _ => "Group",
+    };
+
+    private static Color GroupColor(int groupType) => groupType switch
+    {
+        0 => new Color(150, 200, 255),   // buddy — blue
+        1 => new Color(120, 220, 160),   // party — green
+        2 => new Color(220, 200, 120),   // guild — gold
+        3 => new Color(200, 160, 220),   // alliance — purple
+        _ => Color.White,
+    };
 
     public override void OnTextInput(char ch)
     {
