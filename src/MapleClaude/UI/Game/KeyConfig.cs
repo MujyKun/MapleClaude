@@ -112,6 +112,30 @@ public sealed class KeyConfig : GamePanel
     // ── Binding store ─────────────────────────────────────────────────────────
     private readonly Dictionary<Keys, KeyAction> _bindings = new();
 
+    /// <summary>Live keyboard bindings; consumed by the settings store to persist
+    /// the user's layout.</summary>
+    public IReadOnlyDictionary<Keys, KeyAction> Bindings => _bindings;
+
+    /// <summary>Fired when the user finishes editing bindings (panel close /
+    /// reset-to-default), so the host can persist them.</summary>
+    public event Action? OnBindingsChanged;
+
+    /// <summary>Replace the live bindings with a previously-persisted layout.
+    /// A null/empty map is ignored (keeps the GMS defaults).</summary>
+    public void LoadBindings(IReadOnlyDictionary<Keys, KeyAction>? bindings)
+    {
+        if (bindings is null || bindings.Count == 0) return;
+        _bindings.Clear();
+        foreach (var (k, v) in bindings) _bindings[k] = v;
+    }
+
+    private void CloseConfig()
+    {
+        IsVisible = false;
+        _rebindTarget = null;
+        OnBindingsChanged?.Invoke();
+    }
+
     // ── Visual keyboard grid ──────────────────────────────────────────────────
     private static readonly (Keys key, string label)[][] KeyRows =
     [
@@ -174,9 +198,9 @@ public sealed class KeyConfig : GamePanel
         var kc = ui?.GetItem("UIWindow.img/KeyConfig") as WzProperty;
         _background = kc?.Get("backgrnd") is WzCanvas bc ? loader.Load(bc) : null;
 
-        _btClose   = MakeBtn(loader, kc, "BtClose",  () => { IsVisible = false; _rebindTarget = null; });
-        _btDefault = MakeBtn(loader, kc, "BtDefault", ResetToDefault);
-        _btOk      = MakeBtn(loader, kc, "BtOK",     () => { IsVisible = false; _rebindTarget = null; });
+        _btClose   = MakeBtn(loader, kc, "BtClose",  CloseConfig);
+        _btDefault = MakeBtn(loader, kc, "BtDefault", () => { ResetToDefault(); OnBindingsChanged?.Invoke(); });
+        _btOk      = MakeBtn(loader, kc, "BtOK",     CloseConfig);
 
         ResetToDefault();
         LayoutButtons();
@@ -449,7 +473,7 @@ public sealed class KeyConfig : GamePanel
             return true;
         }
 
-        if (key == Keys.Escape) { IsVisible = false; return true; }
+        if (key == Keys.Escape) { CloseConfig(); return true; }
         return false;
     }
 

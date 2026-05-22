@@ -4,6 +4,7 @@ using MapleClaude.Net.Handlers;
 using MapleClaude.Net.Session;
 using MapleClaude.Platform;
 using MapleClaude.Render;
+using MapleClaude.Settings;
 using MapleClaude.Stages;
 using MapleClaude.Wz;
 using Microsoft.Extensions.Configuration;
@@ -67,6 +68,10 @@ public sealed class MapleClaudeGame : Game
 
     public Texture2D WhitePixel => _white;
     public WzAudioPlayer AudioPlayer { get; }
+
+    /// <summary>Persisted user preferences (keybinds + volumes) at
+    /// <c>%APPDATA%/MapleClaude/settings.json</c>.</summary>
+    public SettingsStore Settings { get; }
     public WzPackage? UiWz => _uiWz;
     public WzPackage? MapWz => _mapWz;
     public WzPackage? SoundWz => _soundWz;
@@ -91,6 +96,10 @@ public sealed class MapleClaudeGame : Game
 
     /// <summary>Migration coordinator (login → channel handoff).</summary>
     public MigrationCoordinator Migration { get; }
+
+    /// <summary>The selected character's id, cached at character select and
+    /// confirmed on each SetField — reused for in-game channel transfers.</summary>
+    public int CharacterId { get; set; }
 
     /// <summary>Resolved login server host (env <c>MAPLECLAUDE_LOGIN_HOST</c>, default 127.0.0.1).</summary>
     public string LoginHost { get; }
@@ -119,6 +128,7 @@ public sealed class MapleClaudeGame : Game
         _loggerFactory = loggerFactory;
         _wzDir = ResolveWzDir(config);
         AudioPlayer = new WzAudioPlayer(loggerFactory.CreateLogger<WzAudioPlayer>());
+        Settings = new SettingsStore(loggerFactory.CreateLogger<SettingsStore>());
         DebugRegistry = debugRegistry;
         Session = session;
         LoginHandlers = loginHandlers;

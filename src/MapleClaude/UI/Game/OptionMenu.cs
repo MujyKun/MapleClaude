@@ -53,7 +53,27 @@ public sealed class OptionMenu : GamePanel
         ApplyLayout();
     }
 
-    private void Accept() => IsVisible = false;
+    /// <summary>BGM volume, 0–100.</summary>
+    public int BgmVolume => _bgmVolume;
+    /// <summary>SFX volume, 0–100.</summary>
+    public int SfxVolume => _sfxVolume;
+
+    /// <summary>Fired when the user commits changes (OK), so the host can persist
+    /// them and apply the new volumes live.</summary>
+    public event Action? OnSettingsChanged;
+
+    /// <summary>Apply previously-persisted volumes (clamped to 0–100).</summary>
+    public void LoadVolumes(int bgm, int sfx)
+    {
+        _bgmVolume = Math.Clamp(bgm, 0, 100);
+        _sfxVolume = Math.Clamp(sfx, 0, 100);
+    }
+
+    private void Accept()
+    {
+        IsVisible = false;
+        OnSettingsChanged?.Invoke();
+    }
 
     private void Cancel()
     {

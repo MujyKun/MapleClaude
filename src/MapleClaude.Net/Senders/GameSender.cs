@@ -121,11 +121,52 @@ public static class GameSender
         public const int Luk = 0x400;
     }
 
+    // ── Field travel / migration ─────────────────────────────────────────────────
+
+    // UserTransferChannelRequest(42): byte channelId, int update_time.
+    // (upstream MigrationHandler.handleUserTransferChannelRequest reads both.)
     public static OutPacket TransferChannel(int channelId)
     {
         var p = OutPacket.Of(InHeader.UserTransferChannelRequest);
         p.WriteByte((byte)channelId);
+        p.WriteInt(0);                       // update_time
         return p;
+    }
+
+    // UserTransferFieldRequest(41): byte fieldKey, int targetMap, string portal,
+    // [short x, short y if portal != ""], byte 0, byte premium, byte chase.
+    // Mirrors MigrationHandler.handleUserTransferFieldRequest.
+    public static OutPacket TransferField(byte fieldKey, int targetMap, string portal, short x, short y)
+    {
+        var p = OutPacket.Of(InHeader.UserTransferFieldRequest);
+        p.WriteByte(fieldKey);
+        p.WriteInt(targetMap);               // dwTargetField
+        p.WriteString(portal);               // sPortal (destination portal name)
+        if (!string.IsNullOrEmpty(portal))
+        {
+            p.WriteShort(x);                 // GetPos()->x
+            p.WriteShort(y);                 // GetPos()->y
+        }
+        p.WriteByte(0);                      // (unused)
+        p.WriteByte(0);                      // bPremium
+        p.WriteByte(0);                      // bChase
+        return p;
+    }
+
+    // UserMigrateToCashShopRequest(43): int update_time. The cash shop runs on the
+    // SAME connection — the server replies with SetCashShop + load packets.
+    public static OutPacket MigrateToCashShop()
+    {
+        var p = OutPacket.Of(InHeader.UserMigrateToCashShopRequest);
+        p.WriteInt(0);                       // update_time
+        return p;
+    }
+
+    // Return from the cash shop: an EMPTY UserTransferFieldRequest body — the
+    // server treats a zero-length packet as "re-enter the channel".
+    public static OutPacket ReturnFromCashShop()
+    {
+        return OutPacket.Of(InHeader.UserTransferFieldRequest);
     }
 
     // UserSelectNpc(63): int objectId, short userX, short userY
