@@ -35,13 +35,6 @@ public sealed class GamePacketHandler
     /// preserve prior values).</summary>
     public Action<CharStats>? OnStatChanged;
 
-    /// <summary>Fired after a <c>UserChat</c> packet: (name, text, chatType).
-    /// The handler decodes <c>int charId, byte lType, string sChat, byte bOnlyBalloon</c>
-    /// per upstream <c>UserPacket.chat</c>; the speaker's name is not on the wire
-    /// (just the char id), so the name argument is empty until/unless the stage
-    /// cross-references against its other-char map.</summary>
-    public Action<string, string, byte>? OnUserChat;
-
     /// <summary>Fired after a <c>FuncKeyMappedInit</c> packet is fully decoded;
     /// <see cref="FuncKeyEntries"/> holds the 89-entry array the receiver can feed
     /// into <c>KeyConfig.ApplyServerKeymap</c>.</summary>
@@ -79,7 +72,9 @@ public sealed class GamePacketHandler
     {
         var router = session.PacketRouter;
         Wrap(router, OutHeader.StatChanged,        HandleStatChanged);
-        Wrap(router, OutHeader.UserChat,           HandleUserChat);
+        // UserChat is handled canonically by FieldHandlers.OnUserChat (which the
+        // GameStage feeds into the ChatBar). We no longer wrap it here to avoid
+        // a duplicate chat line per inbound message.
         Wrap(router, OutHeader.FuncKeyMappedInit,  HandleFuncKeyMappedInit);
         Wrap(router, OutHeader.AliveReq,           HandleAliveReq);
         Wrap(router, OutHeader.Message,            HandleMessage);
@@ -199,23 +194,6 @@ public sealed class GamePacketHandler
         try { p.ReadByte(); } catch { /* BattleRecoveryInfo flag */ }
 
         OnStatChanged?.Invoke(stats);
-    }
-
-    // UserPacket.chat (OutHeader.UserChat = 181):
-    //   int charId, byte lType, string sChat, byte bOnlyBalloon
-    private void HandleUserChat(InPacket p)
-    {
-        var charId       = p.ReadInt();
-        var chatType     = p.ReadByte();
-        var text         = p.ReadString();
-        _ = p.ReadByte();     // bOnlyBalloon
-        // Upstream packet carries only the char id; the stage cross-references
-        // its other-char roster for the display name. Pass empty so callers
-        // can apply their own lookup; charId is exposed via chatType byte? No
-        // — caller doesn't see the id directly here. Surface the id as part
-        // of the name placeholder so debug overlays can still see it.
-        var name = charId == 0 ? string.Empty : charId.ToString();
-        OnUserChat?.Invoke(name, text, chatType);
     }
 
     // FieldPacket.funcKeyMappedInit (OutHeader.FuncKeyMappedInit = 398):

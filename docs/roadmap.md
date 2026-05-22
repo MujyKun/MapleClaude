@@ -130,13 +130,22 @@ isolated so this is safe to defer; the buff HUD is optimistic until then);
 `UserEffectLocal/Remote` skill animations; skill-to-function-key binding;
 String.wz skill names; cooldown UI; active/passive split (needs Skill.wz).
 
-## Phase 8 — Social
+## Phase 8 — Social (shipped)
 
-**Scope.** Chat (`UserChat`), whispers, party invite / leave / chat, friend
-list, guild basics.
+**Scope.** Map chat (`UserChat` — fixed the missing `update_time` field that
+desynced sends), party/buddy/guild chat (`GroupMessage` 140/150) + whisper
+(`Whisper` 141/151) in the `ChatBar`. Party (`PartyRequest(145)` create/invite/
+leave/join + `PartyResult(62)` PARTYDATA member-list decode) and friends
+(`FriendRequest(153)` load + `FriendResult(65)` decode) populate the `UserList`.
+Chat commands `/w`, `/p`, `/invite`, `/accept`, `/create`, `/leave`. A party
+invite arrives as a ChatBar prompt; `/accept` sends `JoinParty`.
 
-**Exit criteria.** Two clients can join a party, chat in party channel, and
-see each other's positions on the minimap.
+**Exit criteria.** Two clients can party up (invite → `/accept`) and chat in
+the party channel; both appear in the party tab. (Minimap party dots deferred.)
+
+**Deferred:** guild (`GuildResult`/`GuildRequest`), messenger, party HP on the
+party HUD, friend add/delete UI buttons (the senders exist), minimap party
+positions, a dedicated yes/no invite popup (uses the `/accept` chat command).
 
 ## Phase 9 — Loot
 

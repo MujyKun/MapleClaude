@@ -45,6 +45,20 @@ public sealed class FieldHandlers
 
     // ── Chat / broadcast ──────────────────────────────────────────────────────
     public event Action<UserChatArgs>?          OnUserChat;
+    /// <summary>Party / buddy / guild group chat: (groupType, fromName, text).
+    /// groupType 0=Friend/Buddy 1=Party 2=Guild 3=Alliance.</summary>
+    public event Action<int, string, string>?   OnGroupMessage;
+    /// <summary>An incoming whisper was received: (fromName, channelId, text).</summary>
+    public event Action<string, int, string>?   OnWhisper;
+
+    // ── Social: party / friends ────────────────────────────────────────────────
+    /// <summary>A party invite arrived: (inviterId, inviterName).</summary>
+    public event Action<int, string>?           OnPartyInvite;
+    /// <summary>Party roster (re)loaded: (members, partyBossId). Empty members
+    /// list means the party disbanded / the player left.</summary>
+    public event Action<List<PartyMember>, int>? OnPartyLoad;
+    /// <summary>Friend list (re)loaded.</summary>
+    public event Action<List<FriendInfo>>?      OnFriendList;
 
     // ── NPC script ────────────────────────────────────────────────────────────
     public event Action<ScriptMessageArgs>?     OnScriptMessage;
@@ -91,6 +105,11 @@ public sealed class FieldHandlers
         OnDropLeave           = null;
         OnInventoryOperation  = null;
         OnUserChat            = null;
+        OnGroupMessage        = null;
+        OnWhisper             = null;
+        OnPartyInvite         = null;
+        OnPartyLoad           = null;
+        OnFriendList          = null;
         OnScriptMessage       = null;
         OnSkillRecordResult   = null;
         OnTemporaryStatSet    = null;
@@ -118,6 +137,10 @@ public sealed class FieldHandlers
         router.Register(OutHeader.DropLeaveField,      (p, s) => HandleDropLeave(p));
         router.Register(OutHeader.InventoryOperation,  (p, s) => HandleInventoryOp(p));
         router.Register(OutHeader.UserChat,            (p, s) => HandleUserChat(p));
+        router.Register(OutHeader.GroupMessage,        (p, s) => HandleGroupMessage(p));
+        router.Register(OutHeader.Whisper,             (p, s) => HandleWhisper(p));
+        router.Register(OutHeader.PartyResult,         (p, s) => HandlePartyResult(p));
+        router.Register(OutHeader.FriendResult,        (p, s) => HandleFriendResult(p));
         router.Register(OutHeader.ScriptMessage,       (p, s) => HandleScriptMessage(p));
         router.Register(OutHeader.FuncKeyMappedInit,   (p, s) => HandleFuncKeyMappedInit(p));
         router.Register(OutHeader.FootHoldInfo,        (p, s) => HandleFootHoldInfo(p));
@@ -618,6 +641,222 @@ public sealed class FieldHandlers
         OnUserChat?.Invoke(new UserChatArgs { CharId = charId, Text = text });
     }
 
+    // ── Group chat ──────────────────────────────────────────────────────────────
+    // FieldPacket.groupMessage (OutHeader.GroupMessage = 150):
+    //   byte groupType, string fromName, string text.
+    private void HandleGroupMessage(InPacket p)
+    {
+        var groupType = p.ReadByte();
+        var fromName  = p.ReadString();
+        var text      = p.ReadString();
+        OnGroupMessage?.Invoke(groupType, fromName, text);
+    }
+
+    // ── Whisper ─────────────────────────────────────────────────────────────────
+    // WhisperPacket (OutHeader.Whisper = 151): byte flag, then a flag-specific
+    // body. We only surface WhisperReceive (flag 0x12 = Whisper 0x2 | Receive
+    // 0x10) as a chat line: { string fromName, byte channelId, byte fromAdmin,
+    // string text }. WhisperResult / LocationResult replies are logged only.
+    // Incoming parse errors are isolated (they never desync the cipher), so a
+    // best-effort decode is safe.
+    private const int WhisperReceiveBit = 0x10;
+
+    private void HandleWhisper(InPacket p)
+    {
+        var flag = p.ReadByte();
+        if ((flag & WhisperReceiveBit) != 0)
+        {
+            try
+            {
+                var fromName  = p.ReadString();
+                var channelId = p.ReadByte();
+                p.ReadByte();                   // bFromAdmin
+                var text      = p.ReadString();
+                OnWhisper?.Invoke(fromName, channelId, text);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex, "Whisper receive partial decode flag={Flag}", flag);
+            }
+        }
+        else
+        {
+            _logger.LogDebug("Whisper result/location reply flag={Flag} (not shown)", flag);
+        }
+    }
+
+    // ── Party result ────────────────────────────────────────────────────────────
+    // PartyPacket (OutHeader.PartyResult = 62): byte resultType then a per-type
+    // body. resultType values mirror upstream kinoko/server/party/PartyResultType.
+    private const int PartyResInviteParty        = 4;
+    private const int PartyResLoadPartyDone      = 7;
+    private const int PartyResWithdrawPartyDone  = 12;
+    private const int PartyResJoinPartyDone      = 15;
+    private const int PartyResUserMigration      = 38;
+
+    private void HandlePartyResult(InPacket p)
+    {
+        var resultType = p.ReadByte();
+        switch (resultType)
+        {
+            case PartyResInviteParty:
+            {
+                // int inviterId, string inviterName, int level, int job, byte 0
+                var inviterId   = p.ReadInt();
+                var inviterName = p.ReadString();
+                p.ReadInt();                    // nLevel
+                p.ReadInt();                    // nJobCode
+                p.ReadByte();                   // party-search related
+                OnPartyInvite?.Invoke(inviterId, inviterName);
+                break;
+            }
+            case PartyResLoadPartyDone:
+            {
+                // int partyId, PARTYDATA
+                p.ReadInt();                    // nPartyID
+                EmitPartyData(p);
+                break;
+            }
+            case PartyResJoinPartyDone:
+            {
+                // int partyId, string memberName, PARTYDATA
+                p.ReadInt();                    // nPartyID
+                p.ReadString();                 // joining member name
+                EmitPartyData(p);
+                break;
+            }
+            case PartyResWithdrawPartyDone:
+            {
+                // int partyId, int charId, byte notDisband; if notDisband:
+                //   byte kick, string name, PARTYDATA. Else the party disbanded.
+                p.ReadInt();                    // nPartyID
+                p.ReadInt();                    // leaving charId
+                var notDisband = p.ReadBool();
+                if (notDisband)
+                {
+                    p.ReadByte();               // kick / expelled flag
+                    p.ReadString();             // member name
+                    EmitPartyData(p);
+                }
+                else
+                {
+                    OnPartyLoad?.Invoke(new List<PartyMember>(), 0);
+                }
+                break;
+            }
+            case PartyResUserMigration:
+            {
+                // PARTYDATA-bearing in some builds — decode defensively.
+                try
+                {
+                    EmitPartyData(p);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogDebug(ex, "PartyResult UserMigration decode (ignored)");
+                }
+                break;
+            }
+            default:
+                _logger.LogDebug("PartyResult type {Type} not handled", resultType);
+                break;
+        }
+    }
+
+    // PARTYDATA::Decode — column-major, PARTY_MAX = 6. Mirrors upstream
+    // kinoko/server/party/Party.encode byte-for-byte:
+    //   int[6] charId, string(13)[6] name, int[6] job, int[6] level,
+    //   int[6] channelId, int partyBossId, int[6] fieldId,
+    //   TownPortal[6] (each = int townId, int fieldId, int skillId, int x, int y),
+    //   int[6] pqReward, int[6] pqRewardType, int pqRewardMobTemplateId, int bPQReward.
+    // A member slot is empty when charId == 0; empties are skipped.
+    private const int PartyMax = 6;
+
+    private void EmitPartyData(InPacket p)
+    {
+        var charIds   = new int[PartyMax];
+        var names     = new string[PartyMax];
+        var jobs      = new int[PartyMax];
+        var levels    = new int[PartyMax];
+        var channels  = new int[PartyMax];
+
+        for (var i = 0; i < PartyMax; i++) charIds[i]  = p.ReadInt();
+        for (var i = 0; i < PartyMax; i++) names[i]    = p.ReadString(13);
+        for (var i = 0; i < PartyMax; i++) jobs[i]     = p.ReadInt();
+        for (var i = 0; i < PartyMax; i++) levels[i]   = p.ReadInt();
+        for (var i = 0; i < PartyMax; i++) channels[i] = p.ReadInt();
+        var bossId = p.ReadInt();
+        for (var i = 0; i < PartyMax; i++) p.ReadInt();             // fieldId
+        for (var i = 0; i < PartyMax; i++) p.Skip(5 * 4);          // TownPortal (5 ints)
+        for (var i = 0; i < PartyMax; i++) p.ReadInt();             // pqReward
+        for (var i = 0; i < PartyMax; i++) p.ReadInt();             // pqRewardType
+        p.ReadInt();                                                // pqRewardMobTemplateId
+        p.ReadInt();                                                // bPQReward
+
+        var members = new List<PartyMember>(PartyMax);
+        for (var i = 0; i < PartyMax; i++)
+        {
+            if (charIds[i] == 0)
+            {
+                continue;
+            }
+            members.Add(new PartyMember
+            {
+                CharId  = charIds[i],
+                Name    = names[i],
+                Job     = jobs[i],
+                Level   = levels[i],
+                Channel = channels[i],
+            });
+        }
+        OnPartyLoad?.Invoke(members, bossId);
+    }
+
+    // ── Friend result ───────────────────────────────────────────────────────────
+    // FriendPacket (OutHeader.FriendResult = 65): byte resultType. For the list
+    // (re)load shapes (LoadFriend_Done = 7, SetFriend_Done = 10,
+    // DeleteFriend_Done = 18 — all use CWvsContext::CFriend::Reset):
+    //   byte count, count × GW_Friend { int friendId, string name(13), byte flag,
+    //   int channel, string group(17) }, then count × int inShop.
+    // channel == CHANNEL_OFFLINE (-2) means offline (so online == channel >= 0).
+    private const int FriendResLoadFriendDone = 7;
+    private const int FriendResSetFriendDone  = 10;
+    private const int FriendResDeleteFriendDone = 18;
+
+    private void HandleFriendResult(InPacket p)
+    {
+        var resultType = p.ReadByte();
+        if (resultType != FriendResLoadFriendDone &&
+            resultType != FriendResSetFriendDone &&
+            resultType != FriendResDeleteFriendDone)
+        {
+            _logger.LogDebug("FriendResult type {Type} not handled", resultType);
+            return;
+        }
+        var count = p.ReadByte();
+        var friends = new List<FriendInfo>(count);
+        for (var i = 0; i < count; i++)
+        {
+            var friendId = p.ReadInt();
+            var name     = p.ReadString(13);
+            var flag     = p.ReadByte();
+            var channel  = p.ReadInt();
+            p.ReadString(17);               // friend group
+            friends.Add(new FriendInfo
+            {
+                FriendId = friendId,
+                Name     = name,
+                Flag     = flag,
+                Channel  = channel,
+            });
+        }
+        for (var i = 0; i < count; i++)
+        {
+            p.ReadInt();                    // aInShop
+        }
+        OnFriendList?.Invoke(friends);
+    }
+
     // ── NPC Script ────────────────────────────────────────────────────────────
     // Mirrors upstream ScriptMessage.encode (kinoko/script/common/ScriptMessage.java):
     //   byte speakerType, int speakerId, byte msgType, byte messageParam,
@@ -818,6 +1057,26 @@ public sealed class InventoryOpArg
 }
 
 public sealed class UserChatArgs   { public int CharId; public string Text = string.Empty; }
+
+public sealed class PartyMember
+{
+    public int    CharId;
+    public string Name = string.Empty;
+    public int    Job;
+    public int    Level;
+    public int    Channel;
+}
+
+public sealed class FriendInfo
+{
+    public int    FriendId;
+    public string Name = string.Empty;
+    public byte   Flag;
+    public int    Channel;
+    /// <summary>Online when on a real game channel (channel id &gt;= 0). The
+    /// offline sentinel is CHANNEL_OFFLINE (-2); in-shop is CHANNEL_LOGIN (-1).</summary>
+    public bool   Online => Channel >= 0;
+}
 
 public sealed class ScriptMessageArgs
 {

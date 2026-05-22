@@ -23,6 +23,7 @@
     <Folder Include="Crypto\" />
     <Folder Include="Handlers\" />
     <Folder Include="Packet\" />
+    <Folder Include="Senders\" />
     <Folder Include="Session\" />
   </ItemGroup>
 

@@ -109,6 +109,7 @@ public sealed class UserList : GamePanel
     // ── Data API ──────────────────────────────────────────────────────────────
 
     public void AddFriend(FriendEntry e) => _friends.Add(e);
+    public void ClearFriends() { _friends.Clear(); _scroll = 0; }
     public void SetParty(IEnumerable<PartyEntry> p) { _party.Clear(); _party.AddRange(p); }
     public void SetGuild(IEnumerable<GuildEntry> g) { _guild.Clear(); _guild.AddRange(g); }
 
