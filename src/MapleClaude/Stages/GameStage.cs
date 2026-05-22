@@ -172,6 +172,8 @@ public sealed class GameStage : Stage
         _item = new ItemInventory(_loader, _ui, font);
         _item.OnItemActivate = OnInventoryItemActivate;
         _skill = new SkillBook(_loader, _ui, font);
+        _skill.OnSkillUp = id => SendIfConnected(GameSender.SkillUp(id));
+        _skill.OnSkillCast = CastSkill;
         _stats = new StatsInfo(_loader, _ui, font);
         _quest = new QuestLog(_loader, _ui, font);
         _keyConfig = new KeyConfig(_loader, _ui, font);
@@ -330,6 +332,11 @@ public sealed class GameStage : Stage
 
         // ── FieldHandlers events (wired to rendering + UI) ────────────────────
         var fh = Game.FieldHandlers;
+
+        fh.OnSkillRecordResult += records => ApplySkills(records);
+        // Full per-stat buff decode is deferred; the buff icon is added
+        // optimistically on cast (CastSkill). A reset clears the HUD.
+        fh.OnTemporaryStatReset += () => _buffList?.ClearBuffs();
 
         fh.OnStatChanged += a =>
         {
@@ -582,6 +589,38 @@ public sealed class GameStage : Stage
         }
     }
 
+    // ── Skills / buffs ─────────────────────────────────────────────────────────
+
+    private void ApplySkills(IReadOnlyList<SkillRecord> records)
+    {
+        if (_skill is null)
+        {
+            return;
+        }
+        _skill.SetSkills(records.Select(r => new SkillBook.SkillEntry
+        {
+            Id = r.SkillId,
+            Name = $"Skill {r.SkillId}",   // String.wz/Skill.img name lookup deferred
+            Level = r.Level,
+            MaxLevel = r.MasterLevel > 0 ? r.MasterLevel : 20,
+            Passive = false,              // active/passive split needs Skill.wz; treat as castable
+        }));
+    }
+
+    // Double-click a learned active skill → cast it; optimistically show the buff.
+    private void CastSkill(int skillId, int level)
+    {
+        if (!Game.Session.IsConnected)
+        {
+            return;
+        }
+        Game.Session.Send(GameSender.UseSkill(skillId, (byte)level));
+        // Optimistic buff icon — the full TemporaryStatSet decode is deferred, so
+        // we surface the skill the player just cast with a default duration.
+        const int defaultBuffSeconds = 120;
+        _buffList?.AddBuff($"Skill {skillId}", defaultBuffSeconds);
+    }
+
     // Double-click in the item grid: use a consumable, or equip an equip.
     private void OnInventoryItemActivate(int tab, int slot, int itemId)
     {
@@ -654,9 +693,13 @@ public sealed class GameStage : Stage
         Slot = slot,
     };
 
-    /// <summary>Load the initial inventory delivered in SetField's CharacterData.</summary>
+    /// <summary>Load the initial inventory + skills delivered in SetField's CharacterData.</summary>
     private void PopulateInventory(SetFieldArgs args)
     {
+        if (args.Skills is { Count: > 0 })
+        {
+            ApplySkills(args.Skills);
+        }
         if (args.Inventory is null)
         {
             return;

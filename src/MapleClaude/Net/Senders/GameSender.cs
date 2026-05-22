@@ -47,6 +47,30 @@ public static class GameSender
         return p;
     }
 
+    // ── Skills ──────────────────────────────────────────────────────────────────
+
+    // UserSkillUpRequest(102): int update_time, int skillId.
+    public static OutPacket SkillUp(int skillId)
+    {
+        var p = OutPacket.Of(InHeader.UserSkillUpRequest);
+        p.WriteInt(0);                       // update_time
+        p.WriteInt(skillId);
+        return p;
+    }
+
+    // UserSkillUseRequest(103) for a basic self-buff / self-target active skill:
+    // int update_time, int skillId, byte slv, short delay. (Position/party/target
+    // and attack skills add fields — not used for a simple self-cast.)
+    public static OutPacket UseSkill(int skillId, byte slv)
+    {
+        var p = OutPacket.Of(InHeader.UserSkillUseRequest);
+        p.WriteInt(0);                       // update_time
+        p.WriteInt(skillId);
+        p.WriteByte(slv);
+        p.WriteShort(0);                     // tDelay
+        return p;
+    }
+
     public static OutPacket UserChat(string message, bool shout = false)
     {
         var p = OutPacket.Of(InHeader.UserChat);
