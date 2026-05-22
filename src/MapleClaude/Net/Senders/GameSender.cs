@@ -1,3 +1,4 @@
+using MapleClaude.Domain;
 using MapleClaude.Net.Packet;
 
 namespace MapleClaude.Net.Senders;
@@ -7,6 +8,43 @@ public static class GameSender
     public static OutPacket AliveAck()
     {
         return OutPacket.Of(InHeader.AliveAck);
+    }
+
+    // ── Inventory ──────────────────────────────────────────────────────────────
+
+    // UserChangeSlotPositionRequest(77): int update_time, byte invType,
+    // short oldPos, short newPos, short count.
+    // Equip: oldPos = source inventory slot, newPos = NEGATIVE body part.
+    // Unequip: oldPos = NEGATIVE body part, newPos = free inventory slot.
+    // Drop: newPos = 0.
+    public static OutPacket ChangeSlotPosition(InventoryType invType, short oldPos, short newPos, short count)
+    {
+        var p = OutPacket.Of(InHeader.UserChangeSlotPositionRequest);
+        p.WriteInt(0);                       // update_time
+        p.WriteByte((byte)invType);
+        p.WriteShort(oldPos);
+        p.WriteShort(newPos);
+        p.WriteShort(count);
+        return p;
+    }
+
+    // UserStatChangeItemUseRequest(78): int update_time, short pos, int itemId.
+    public static OutPacket UseItem(short pos, int itemId)
+    {
+        var p = OutPacket.Of(InHeader.UserStatChangeItemUseRequest);
+        p.WriteInt(0);                       // update_time
+        p.WriteShort(pos);
+        p.WriteInt(itemId);
+        return p;
+    }
+
+    // UserDropMoneyRequest(106): int update_time, int amount.
+    public static OutPacket DropMoney(int amount)
+    {
+        var p = OutPacket.Of(InHeader.UserDropMoneyRequest);
+        p.WriteInt(0);                       // update_time
+        p.WriteInt(amount);
+        return p;
     }
 
     public static OutPacket UserChat(string message, bool shout = false)

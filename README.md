@@ -16,7 +16,7 @@ MapleClaude is a brand-new client written in C# 13 / .NET 10 with MonoGame for r
 | 3.5 | Cosmetic in-game UI (StatusBar, Inventory, SkillBook, MiniMap, KeyConfig, etc.) — UI only, no server data yet | shipped |
 | 4 | Mobs: `MobEnterField` / `MobMove` / `MobChangeController` decode, mob sprites + animation + HP bar, `UserMeleeAttack(47)` outgoing, damage numbers, kill + respawn | shipped |
 | 5 | NPCs: `NpcEnterField` render, click-to-talk + Interact key (`UserSelectNpc`), `ScriptMessage` decode (say/menu/yes-no/text/number) + `UserScriptMessageAnswer` | shipped |
-| 6 | Inventory wire-up: drive the StatusBar's `ItemInventory` / `EquipInventory` panels from real `InventoryOperation` packets, equip swap with stat updates | planned |
+| 6 | Inventory: full `Item`/`ItemSlot` decode, initial inventory from `SetField` `CharacterData`, live `InventoryOperation(28)` updates, double-click to use/equip (`UserStatChangeItemUseRequest` / `UserChangeSlotPositionRequest`), drop money | shipped |
 | 7 | Skills + buffs: drive the `SkillBook` panel from `ChangeSkillRecordResult`, send `UserSkillUseRequest`, decode `TemporaryStatSet`/`Reset` for the `BuffList` HUD | planned |
 | 8 | Social: drive the existing `ChatBar` / `UserList` / `Messenger` UIs from real `UserChat` / `FriendResult` / `PartyResult` / `GuildResult` packets | planned |
 | 9 | Drops, pickup, EXP / meso popups (already-built `StatusMessenger` UI hooks up to `DropEnterField` and stat-change packets) | planned |
@@ -38,6 +38,7 @@ See `docs/roadmap.md` for the detailed roadmap and `CLAUDE.md` for the contribut
 | Alt / Space / W | Jump in-game (configurable via `KeyConfig`) |
 | Attack key (configurable via `KeyConfig`) | Melee swing — hits mobs in range, sends `UserMeleeAttack(47)` |
 | Interact key (configurable via `KeyConfig`) / click an NPC | Talk to the nearest/clicked NPC (`UserSelectNpc`) |
+| Double-click an item (inventory panel) | Use a consumable, or equip an equip item |
 | Ctrl+A / Ctrl+C / Ctrl+V / Ctrl+X | Select all / copy / paste / cut in text input fields (login ID, character name) |
 | Right Alt | Toggle Korean IME Hangul ↔ English mode when Korean is the active Windows input language |
 
@@ -58,6 +59,8 @@ See `docs/roadmap.md` for the detailed roadmap and `CLAUDE.md` for the contribut
 | `MobEnterField(284)` / `MobLeaveField(285)` / `MobMove(287)` / `MobChangeController(286)` / `MobDamaged(294)` | S→C | `src/MapleClaude.Net/Handlers/FieldHandlers.cs` → `src/MapleClaude/Character/MobLook.cs` |
 | `UserSelectNpc(63)` / `UserScriptMessageAnswer(65)` | C→S | `src/MapleClaude/Stages/GameStage.cs` + `src/MapleClaude/Net/Senders/GameSender.cs` |
 | `NpcEnterField(311)` / `NpcLeaveField(312)` / `ScriptMessage(363)` | S→C | `src/MapleClaude.Net/Handlers/FieldHandlers.cs` → `src/MapleClaude/UI/Game/NpcTalk.cs` |
+| `InventoryOperation(28)` | S→C | `src/MapleClaude.Net/Handlers/FieldHandlers.cs` + `src/MapleClaude.Net/Packet/ItemDecoder.cs` → `src/MapleClaude/UI/Game/ItemInventory.cs` |
+| `UserChangeSlotPositionRequest(77)` / `UserStatChangeItemUseRequest(78)` / `UserDropMoneyRequest(106)` | C→S | `src/MapleClaude/Stages/GameStage.cs` + `src/MapleClaude/Net/Senders/GameSender.cs` |
 | `AliveReq(17)` / `AliveAck(25)` | S↔C | auto-replied in both `LoginHandlers` and `FieldHandlers` |
 
 All Maple wire strings are length-prefixed LE-short + US-ASCII (not UTF-16LE). All multi-byte primitives are little-endian.

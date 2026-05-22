@@ -103,6 +103,35 @@ public sealed class EquipInventory : GamePanel
     public void Equip(string slotKey, string itemName) => _equipped[slotKey] = itemName;
     public void Unequip(string slotKey) => _equipped.Remove(slotKey);
 
+    public void ClearEquipped() => _equipped.Clear();
+
+    // Maps a v95 equipped body-part number to this panel's slot key.
+    private static readonly Dictionary<int, string> BodyPartToKey = new()
+    {
+        [1] = "Hat", [2] = "FaceAcc", [3] = "EyeAcc", [4] = "Earring",
+        [5] = "Top", [6] = "Bottom", [7] = "Shoes", [8] = "Gloves",
+        [9] = "Cape", [10] = "Shield", [11] = "Weapon",
+        [12] = "Ring1", [13] = "Ring2", [15] = "Ring1", [16] = "Ring2",
+        [17] = "Pendant", [49] = "Belt", [50] = "Medal",
+    };
+
+    /// <summary>Show an item worn at the given v95 body part. No-op for unmapped parts.</summary>
+    public void SetEquipped(int bodyPart, string itemName)
+    {
+        if (BodyPartToKey.TryGetValue(bodyPart, out var key))
+        {
+            _equipped[key] = itemName;
+        }
+    }
+
+    public void RemoveEquipped(int bodyPart)
+    {
+        if (BodyPartToKey.TryGetValue(bodyPart, out var key))
+        {
+            _equipped.Remove(key);
+        }
+    }
+
     // ── Update ─────────────────────────────────────────────────────────────────
 
     public override void Update(GameTime gt)
