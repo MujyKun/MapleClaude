@@ -111,13 +111,24 @@ applied when the server sends it; client-initiated drag is a later UI pass);
 String.wz item-name lookup (panels show the wire title or a formatted id);
 NPC shops (`OpenShopDlg`/`UserShopRequest`).
 
-## Phase 7 — Skills, jobs, buffs
+## Phase 7 — Skills, jobs, buffs (shipped)
 
-**Scope.** Skill tree UI, skill bar, key configuration, `UserSkillUseRequest`,
-`TemporaryStatSet` / `TemporaryStatReset` decoders, buff icon HUD.
+**Scope.** `SkillRecord` decode from `SetField`'s `CharacterData` SKILLRECORD
+section + live `ChangeSkillRecordResult(35)` drive the `SkillBook` panel.
+SP-up (`UserSkillUpRequest(102)`) and double-click cast of a learned active
+skill (`UserSkillUseRequest(103)`, self-buff body). The `BuffList` HUD shows a
+buff optimistically on cast and expires it on a local timer; `TemporaryStatReset(32)`
+clears it. Skill/buff opcodes added to `OpCodes.cs`.
 
-**Exit criteria.** Use a job's first-class skill, see the buff appear, watch
-it expire.
+**Exit criteria.** Skill book shows the character's learned skills; double-click
+an active skill → it casts (no disconnect); for a buff skill the icon appears
+and expires; SP-up adds a level via the server.
+
+**Deferred:** full `TemporaryStatSet(31)` per-stat decode (needs the entire
+`CharacterTemporaryStat` enum + LOCAL_ENCODE_ORDER — incoming parse errors are
+isolated so this is safe to defer; the buff HUD is optimistic until then);
+`UserEffectLocal/Remote` skill animations; skill-to-function-key binding;
+String.wz skill names; cooldown UI; active/passive split (needs Skill.wz).
 
 ## Phase 8 — Social
 

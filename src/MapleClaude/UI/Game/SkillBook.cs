@@ -52,6 +52,16 @@ public sealed class SkillBook : GamePanel
     public int SP { get; set; } = 0;
     public int JobId { get; set; } = 0; // 0 = Beginner
 
+    /// <summary>Fired when the player clicks a row's SP-up button (server-authoritative
+    /// when set — the panel does not increment locally). Arg = skill id.</summary>
+    public Action<int>? OnSkillUp { get; set; }
+
+    /// <summary>Fired on double-click of a learned, active skill row. Arg = (skillId, level).</summary>
+    public Action<int, int>? OnSkillCast { get; set; }
+
+    private double _lastClickTime;
+    private int _lastClickRow = -1;
+
     private readonly BuiltInFont? _font;
 
     // Panel geometry
@@ -143,8 +153,17 @@ public sealed class SkillBook : GamePanel
         if (abs >= tab.Count) return;
         var sk = tab[abs];
         if (sk.Level >= sk.MaxLevel) return;
-        sk.Level++;
-        SP--;
+        if (OnSkillUp != null)
+        {
+            // Server-authoritative: request the up; ChangeSkillRecordResult applies it.
+            OnSkillUp(sk.Id);
+        }
+        else
+        {
+            // Offline / demo fallback.
+            sk.Level++;
+            SP--;
+        }
     }
 
     // ── Update ───────────────────────────────────────────────────────────────
@@ -258,6 +277,35 @@ public sealed class SkillBook : GamePanel
         foreach (var b in _allButtons)
             if (b?.HandleMouseButton(x, y, down) == true) return true;
         _btClose?.HandleMouseButton(x, y, down);
+
+        // Double-click a learned, active skill row → cast it.
+        if (down)
+        {
+            var tab = ActiveTab();
+            for (var i = 0; i < Rows; i++)
+            {
+                var abs = _scrollOffset + i;
+                if (abs >= tab.Count) break;
+                var rowRect = new Rectangle((int)Position.X + ListX, (int)Position.Y + ListY + i * RowH, PanelW - ListX * 2, RowH);
+                if (!rowRect.Contains(x, y)) continue;
+                var now = Environment.TickCount64 / 1000.0;
+                if (_lastClickRow == abs && now - _lastClickTime < 0.4)
+                {
+                    var sk = tab[abs];
+                    if (!sk.Passive && sk.Level > 0)
+                    {
+                        OnSkillCast?.Invoke(sk.Id, sk.Level);
+                    }
+                    _lastClickRow = -1;
+                }
+                else
+                {
+                    _lastClickRow = abs;
+                    _lastClickTime = now;
+                }
+                return true;
+            }
+        }
         return new Rectangle((int)Position.X, (int)Position.Y, PanelW, PanelH).Contains(x, y);
     }
 

@@ -49,6 +49,15 @@ public sealed class FieldHandlers
     // ── NPC script ────────────────────────────────────────────────────────────
     public event Action<ScriptMessageArgs>?     OnScriptMessage;
 
+    // ── Skills / buffs ─────────────────────────────────────────────────────────
+    public event Action<List<SkillRecord>>?     OnSkillRecordResult;
+    /// <summary>A buff (temporary-stat) set occurred — full per-stat decode is
+    /// deferred, so this just signals "something was applied".</summary>
+    public event Action?                        OnTemporaryStatSet;
+    /// <summary>One or more buffs expired (the reset flag is not yet mapped to
+    /// individual skills).</summary>
+    public event Action?                        OnTemporaryStatReset;
+
     // ── Key bindings ──────────────────────────────────────────────────────────
     public event Action<List<FuncKeyEntry>>?    OnFuncKeyMappedInit;
 
@@ -83,6 +92,9 @@ public sealed class FieldHandlers
         OnInventoryOperation  = null;
         OnUserChat            = null;
         OnScriptMessage       = null;
+        OnSkillRecordResult   = null;
+        OnTemporaryStatSet    = null;
+        OnTemporaryStatReset  = null;
         OnFuncKeyMappedInit   = null;
         OnFootHoldInfo        = null;
     }
@@ -109,6 +121,9 @@ public sealed class FieldHandlers
         router.Register(OutHeader.ScriptMessage,       (p, s) => HandleScriptMessage(p));
         router.Register(OutHeader.FuncKeyMappedInit,   (p, s) => HandleFuncKeyMappedInit(p));
         router.Register(OutHeader.FootHoldInfo,        (p, s) => HandleFootHoldInfo(p));
+        router.Register(OutHeader.ChangeSkillRecordResult, (p, s) => HandleChangeSkillRecord(p));
+        router.Register(OutHeader.TemporaryStatSet,    (p, s) => OnTemporaryStatSet?.Invoke());
+        router.Register(OutHeader.TemporaryStatReset,  (p, s) => OnTemporaryStatReset?.Invoke());
     }
 
     // ── SetField ──────────────────────────────────────────────────────────────
@@ -156,6 +171,7 @@ public sealed class FieldHandlers
                 p.ReadByte();                       // cash inv size
                 p.ReadLong();                       // aEquipExtExpire (FileTime)
                 args.Inventory = DecodeInventory(p);
+                args.Skills = DecodeSkillRecords(p); // DBChar.SKILLRECORD section
             }
             catch (Exception ex)
             {
@@ -229,10 +245,60 @@ public sealed class FieldHandlers
         return list;
     }
 
+    // CharacterData SKILLRECORD section: short count, per record
+    // { int skillId, int level, FileTime expire, if needMasterLevel: int masterLevel }.
+    private static List<SkillRecord> DecodeSkillRecords(InPacket p)
+    {
+        var records = new List<SkillRecord>();
+        var count = p.ReadShort();
+        for (var i = 0; i < count; i++)
+        {
+            var skillId = p.ReadInt();
+            var level   = p.ReadInt();
+            p.ReadLong();                       // expire (FileTime)
+            var masterLevel = IsSkillNeedMasterLevel(skillId) ? p.ReadInt() : 0;
+            records.Add(new SkillRecord { SkillId = skillId, Level = level, MasterLevel = masterLevel });
+        }
+        return records;
+    }
+
+    // Mirrors upstream SkillConstants.isSkillNeedMasterLevel for common jobs:
+    // a first-job-base id (e.g. 100/200/1000) never needs it; otherwise a
+    // 4th-job skill (job id ending in 2) does. Evan/Dual edge cases are
+    // approximated — a miss only corrupts the trailing skill list, which is
+    // isolated (the field still loads).
+    private static bool IsSkillNeedMasterLevel(int skillId)
+    {
+        var jobId = skillId / 10000;
+        if (jobId == 100 * (jobId / 100))
+        {
+            return false;
+        }
+        return jobId % 10 == 2;
+    }
+
     private void HandleAliveReq(ClientSession session)
     {
         var ack = OutPacket.Of(InHeader.AliveAck);
         session.Send(ack);
+    }
+
+    // ChangeSkillRecordResult: byte exclRequest, short count,
+    // per { int skillId, int level, int masterLevel, FileTime expire }, byte bSN.
+    private void HandleChangeSkillRecord(InPacket p)
+    {
+        p.ReadByte();                       // exclRequest
+        var count = p.ReadShort();
+        var records = new List<SkillRecord>(count);
+        for (var i = 0; i < count; i++)
+        {
+            var skillId     = p.ReadInt();
+            var level       = p.ReadInt();
+            var masterLevel = p.ReadInt();
+            p.ReadLong();                   // expire (FileTime)
+            records.Add(new SkillRecord { SkillId = skillId, Level = level, MasterLevel = masterLevel });
+        }
+        OnSkillRecordResult?.Invoke(records);
     }
 
     // ── StatChanged ───────────────────────────────────────────────────────────
@@ -686,6 +752,8 @@ public sealed class SetFieldArgs
     /// Keyed by <see cref="MapleClaude.Domain.InventoryType"/>; positions are 1-based
     /// (negative for equipped body parts).</summary>
     public Dictionary<InventoryType, List<(short pos, InventoryItem item)>>? Inventory { get; set; }
+    /// <summary>Learned skills delivered in CharacterData's SKILLRECORD section.</summary>
+    public List<SkillRecord>? Skills { get; set; }
 }
 
 public sealed class StatChangedArgs

@@ -17,7 +17,7 @@ MapleClaude is a brand-new client written in C# 13 / .NET 10 with MonoGame for r
 | 4 | Mobs: `MobEnterField` / `MobMove` / `MobChangeController` decode, mob sprites + animation + HP bar, `UserMeleeAttack(47)` outgoing, damage numbers, kill + respawn | shipped |
 | 5 | NPCs: `NpcEnterField` render, click-to-talk + Interact key (`UserSelectNpc`), `ScriptMessage` decode (say/menu/yes-no/text/number) + `UserScriptMessageAnswer` | shipped |
 | 6 | Inventory: full `Item`/`ItemSlot` decode, initial inventory from `SetField` `CharacterData`, live `InventoryOperation(28)` updates, double-click to use/equip (`UserStatChangeItemUseRequest` / `UserChangeSlotPositionRequest`), drop money | shipped |
-| 7 | Skills + buffs: drive the `SkillBook` panel from `ChangeSkillRecordResult`, send `UserSkillUseRequest`, decode `TemporaryStatSet`/`Reset` for the `BuffList` HUD | planned |
+| 7 | Skills + buffs: `SkillBook` driven by `CharacterData` skill records + `ChangeSkillRecordResult`, SP-up + double-click cast (`UserSkillUpRequest` / `UserSkillUseRequest`), optimistic `BuffList` HUD + `TemporaryStatReset` clear | shipped |
 | 8 | Social: drive the existing `ChatBar` / `UserList` / `Messenger` UIs from real `UserChat` / `FriendResult` / `PartyResult` / `GuildResult` packets | planned |
 | 9 | Drops, pickup, EXP / meso popups (already-built `StatusMessenger` UI hooks up to `DropEnterField` and stat-change packets) | planned |
 | 10 | Polish: full keybind editor, settings persistence, channel transfer (`UserTransferChannelRequest`), Cash Shop migrate (existing `CashShopStage` shell hooks up to real packets), AOT publish | planned |
@@ -39,6 +39,7 @@ See `docs/roadmap.md` for the detailed roadmap and `CLAUDE.md` for the contribut
 | Attack key (configurable via `KeyConfig`) | Melee swing — hits mobs in range, sends `UserMeleeAttack(47)` |
 | Interact key (configurable via `KeyConfig`) / click an NPC | Talk to the nearest/clicked NPC (`UserSelectNpc`) |
 | Double-click an item (inventory panel) | Use a consumable, or equip an equip item |
+| Double-click a skill (skill book) | Cast a learned active skill (`UserSkillUseRequest`) |
 | Ctrl+A / Ctrl+C / Ctrl+V / Ctrl+X | Select all / copy / paste / cut in text input fields (login ID, character name) |
 | Right Alt | Toggle Korean IME Hangul ↔ English mode when Korean is the active Windows input language |
 
@@ -61,6 +62,8 @@ See `docs/roadmap.md` for the detailed roadmap and `CLAUDE.md` for the contribut
 | `NpcEnterField(311)` / `NpcLeaveField(312)` / `ScriptMessage(363)` | S→C | `src/MapleClaude.Net/Handlers/FieldHandlers.cs` → `src/MapleClaude/UI/Game/NpcTalk.cs` |
 | `InventoryOperation(28)` | S→C | `src/MapleClaude.Net/Handlers/FieldHandlers.cs` + `src/MapleClaude.Net/Packet/ItemDecoder.cs` → `src/MapleClaude/UI/Game/ItemInventory.cs` |
 | `UserChangeSlotPositionRequest(77)` / `UserStatChangeItemUseRequest(78)` / `UserDropMoneyRequest(106)` | C→S | `src/MapleClaude/Stages/GameStage.cs` + `src/MapleClaude/Net/Senders/GameSender.cs` |
+| `UserSkillUpRequest(102)` / `UserSkillUseRequest(103)` | C→S | `src/MapleClaude/Stages/GameStage.cs` + `src/MapleClaude/Net/Senders/GameSender.cs` |
+| `ChangeSkillRecordResult(35)` / `TemporaryStatSet(31)` / `TemporaryStatReset(32)` | S→C | `src/MapleClaude.Net/Handlers/FieldHandlers.cs` → `src/MapleClaude/UI/Game/{SkillBook,BuffList}.cs` |
 | `AliveReq(17)` / `AliveAck(25)` | S↔C | auto-replied in both `LoginHandlers` and `FieldHandlers` |
 
 All Maple wire strings are length-prefixed LE-short + US-ASCII (not UTF-16LE). All multi-byte primitives are little-endian.
