@@ -87,6 +87,7 @@ public sealed class GameStage : Stage
     private NpcTalk? _npcTalk;
     private Shop? _shop;
     private Trunk? _trunk;
+    private Messenger? _messengerWin;
     private Notice? _notice;
     private QuitConfirmOverlay? _quitConfirm;
 
@@ -132,6 +133,10 @@ public sealed class GameStage : Stage
     private int _pendingInviterId;
     private bool _hasPendingInvite;
     private string _myName = "Hero";
+
+    // Messenger invite state: the dwSN of a pending messenger invite, joined via /maccept.
+    private int _pendingMessengerId;
+    private bool _hasMessengerInvite;
 
     // Melee attack pacing.
     private float _attackCooldown;
@@ -240,6 +245,9 @@ public sealed class GameStage : Stage
         _trunk.OnSort     = () => SendIfConnected(GameSender.TrunkSort());
         _trunk.OnClosed   = () => SendIfConnected(GameSender.TrunkClose());
 
+        _messengerWin = new Messenger(_loader, _ui, font);
+        _messengerWin.OnClosed = () => SendIfConnected(GameSender.MessengerLeave());
+
         _notice = new Notice(_loader, _ui, font);
 
         _quitConfirm = new QuitConfirmOverlay(_loader, _ui, font, new Vector2(400, 300))
@@ -293,6 +301,7 @@ public sealed class GameStage : Stage
         _panels.Add(_npcTalk);
         _panels.Add(_shop);
         _panels.Add(_trunk);
+        _panels.Add(_messengerWin);
         _panels.Add(_notice);
 
         // ── New high-priority panels ─────────────────────────────────────────
@@ -463,6 +472,47 @@ public sealed class GameStage : Stage
                     break;
                 default:   // failure subtypes (GetNoMoney, PutNoSpace, …)
                     _messenger?.Show(TrunkResultText(args.ResultType), StatusMessenger.MsgColor.White);
+                    break;
+            }
+        };
+
+        // ── Maple Messenger ───────────────────────────────────────────────────
+        fh.OnMessengerResult += args =>
+        {
+            switch (args.Action)
+            {
+                case 1:  // SelfEnterResult — our slot; open the window
+                    _messengerWin?.SetSelf(args.UserIndex);
+                    _chatBar?.AddLine("Messenger opened.", new Color(150, 220, 150));
+                    break;
+                case 0:  // Enter — another participant joined
+                    if (args.Name is { Length: > 0 })
+                    {
+                        _messengerWin?.SetParticipant(args.UserIndex, args.Name);
+                        _chatBar?.AddLine($"{args.Name} joined the messenger.", new Color(150, 220, 150));
+                    }
+                    break;
+                case 2:  // Leave
+                    _messengerWin?.RemoveParticipant(args.UserIndex);
+                    break;
+                case 3:  // Invite
+                    _pendingMessengerId = args.MessengerId;
+                    _hasMessengerInvite = true;
+                    _chatBar?.AddLine($"{args.Name} invited you to a messenger — type /maccept",
+                        new Color(150, 220, 150));
+                    break;
+                case 4:  // InviteResult
+                    _chatBar?.AddLine(args.Flag
+                        ? $"Invited {args.Name} to the messenger."
+                        : $"{args.Name} could not be invited.",
+                        args.Flag ? new Color(150, 220, 150) : new Color(220, 120, 120));
+                    break;
+                case 5:  // Blocked
+                    _chatBar?.AddLine($"{args.Name} declined the messenger.", new Color(220, 120, 120));
+                    break;
+                case 6:  // Chat
+                    if (args.Chat is { Length: > 0 })
+                        _chatBar?.AddLine($"[Messenger] {args.Chat}", new Color(120, 220, 220));
                     break;
             }
         };
@@ -1546,6 +1596,51 @@ public sealed class GameStage : Stage
         if (line.StartsWith("/leave", StringComparison.OrdinalIgnoreCase))
         {
             SendIfConnected(GameSender.PartyLeave());
+            return;
+        }
+
+        // ── Messenger commands ────────────────────────────────────────────────
+        if (line.StartsWith("/messenger", StringComparison.OrdinalIgnoreCase))
+        {
+            SendIfConnected(GameSender.MessengerEnter(0));   // 0 = create a new room
+            _messengerWin?.Open();
+            return;
+        }
+
+        if (TryConsumeCommand(line, "/minvite ", out var mInviteName))
+        {
+            var (name, _) = SplitFirstToken(mInviteName);
+            if (name.Length > 0) SendIfConnected(GameSender.MessengerInvite(name));
+            return;
+        }
+
+        if (line.StartsWith("/maccept", StringComparison.OrdinalIgnoreCase))
+        {
+            if (_hasMessengerInvite)
+            {
+                SendIfConnected(GameSender.MessengerEnter(_pendingMessengerId));
+                _messengerWin?.Open();
+                _hasMessengerInvite = false;
+            }
+            else
+            {
+                _chatBar?.AddLine("No pending messenger invite.", new Color(220, 120, 120));
+            }
+            return;
+        }
+
+        if (line.StartsWith("/mleave", StringComparison.OrdinalIgnoreCase))
+        {
+            SendIfConnected(GameSender.MessengerLeave());
+            _messengerWin?.Reset();
+            if (_messengerWin != null) _messengerWin.IsVisible = false;
+            return;
+        }
+
+        if (TryConsumeCommand(line, "/m ", out var mChat) && mChat.Length > 0)
+        {
+            SendIfConnected(GameSender.MessengerChat(mChat));
+            _chatBar?.AddLine($"[Messenger] {_myName} : {mChat}", new Color(120, 220, 220));
             return;
         }
 

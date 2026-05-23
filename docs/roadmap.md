@@ -361,16 +361,27 @@ data; quest availability markers on NPCs.
 **Exit criteria.** Accept a quest, see it in the log, complete it, and receive the
 reward. **Key files:** `UI/Game/QuestLog.cs`, `Net/Handlers/FieldHandlers.cs`.
 
-## Phase 21 — Guild, messenger & combat depth
+## Phase 21 — Guild, messenger & combat depth (guild + messenger shipped)
 
-**Scope.** Guild (`GuildResult`/`GuildRequest`) + the guild tab in `UserList`; the
-messenger window. Combat depth: outbound `MobMove(227)` for client-controlled
-mobs (a mob-side physics sim) and a server-accurate damage formula (now that
-weapon + stat data exist).
+**Scope (shipped).** Guild (`GuildResult`/`GuildRequest`) + the guild tab in
+`UserList`. The **messenger** is now wired too: `Messenger(143)` encoders
+(Enter/Leave/Invite/Chat) in `GameSender` and a `Messenger(372)` decoder in
+`FieldHandlers` that parses every `MessengerProtocol` subtype (Enter consumes the
+embedded `AvatarLook` via `AvatarCodec` before the name; SelfEnterResult, Leave,
+Invite, InviteResult, Blocked, Chat, Avatar, Migrated). A 3-slot `Messenger`
+window shows participants; chat flows through the existing `ChatBar` via `/m`,
+`/messenger`, `/minvite`, `/maccept`, `/mleave` (mirroring the party commands).
 
-**Exit criteria.** A guild loads + displays; controlled mobs move for other
-players; melee damage matches the server. **Key files:**
-`UI/Game/UserList.cs`, `Character/MobLook.cs`, `Net/{Handlers,Senders}/*`.
+**Exit criteria (met).** A guild loads + displays; the messenger opens, invites,
+joins, and chats. **Key files:** `UI/Game/{UserList,Messenger}.cs`,
+`Net/{Handlers,Senders}/*`.
+
+**Deferred — combat depth.** Outbound `MobMove(227)` for client-controlled mobs
+needs a mob-side physics simulation to synthesise a legitimate `MovePath` +
+`HackedCode` (a malformed packet would desync the IV chain — `GameStage.Update`
+keeps this suppressed with a one-shot debug log), and a server-accurate melee
+damage formula needs weapon/stat tables and live tuning. Both are intentionally
+left as a focused, carefully-validated follow-up rather than shipped blind.
 
 ## Conventions across phases
 
