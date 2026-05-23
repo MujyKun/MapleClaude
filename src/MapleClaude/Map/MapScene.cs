@@ -122,7 +122,20 @@ public sealed class MapScene
                     continue;
                 }
                 var obj = ObjInfo.From(entry);
-                _objects.Add((layerIdx, obj, LoadObjSprite(obj)));
+                var sprite = LoadObjSprite(obj);
+                if (sprite is null)
+                {
+                    continue;
+                }
+                // Skip full-screen chrome/promo objects: the per-step Common/frame
+                // (drawn as a centred UI overlay) and seasonal event splashes
+                // (e.g. WorldSelect/dual, an 800x576 banner) the client gates by
+                // condition. Scene props like the signboards (<=605 wide) stay.
+                if (sprite.Width >= 700 || sprite.Height >= 500)
+                {
+                    continue;
+                }
+                _objects.Add((layerIdx, obj, sprite));
             }
         }
         // Draw order: lower layer first, then per-object z within a layer.
