@@ -30,6 +30,11 @@ public sealed class BuffList : GamePanel
     public void AddBuff(string name, int seconds) => _buffs.Add((name, seconds));
     public void ClearBuffs() => _buffs.Clear();
 
+    public override void Relayout(int viewWidth, int viewHeight) =>
+        // Top-right corner, preserving the original 110px right margin (690 on
+        // an 800-wide window). Icons grow leftward from here.
+        Position = new Vector2(viewWidth - 110, 5);
+
     public override void Update(GameTime gameTime)
     {
         var dt = (float)gameTime.ElapsedGameTime.TotalSeconds;

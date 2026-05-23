@@ -113,6 +113,15 @@ public sealed class GameStage : Stage
     // outgoing path; see comment block in Update.
     private bool _loggedMobMoveTodo;
 
+    // ── In-game resolution ───────────────────────────────────────────────────
+    // The login flow runs at 800×600; entering a map switches to the larger
+    // in-game canvas and restores the previous size on exit (the same pattern
+    // CashShopStage uses). _prevW/_prevH capture the login size at enter time.
+    private const int InGameWidth  = 1024;
+    private const int InGameHeight = 768;
+    private int _prevW = 800;
+    private int _prevH = 600;
+
     // Active NPC-dialog message type — answers must echo the type the server sent.
     private ScriptMessageType _dialogMsgType;
 
@@ -155,6 +164,13 @@ public sealed class GameStage : Stage
     {
         base.OnEnter(game);
         _loader = new WzTextureLoader(GraphicsDevice);
+
+        // Entering the game enlarges the window from the 800×600 login canvas to
+        // the in-game resolution; remember the login size to restore on exit.
+        var pp0 = GraphicsDevice.PresentationParameters;
+        _prevW = pp0.BackBufferWidth;
+        _prevH = pp0.BackBufferHeight;
+        Game.ResizeWindow(InGameWidth, InGameHeight);
 
         var pp = GraphicsDevice.PresentationParameters;
         var font = Game.Font;
@@ -682,6 +698,9 @@ public sealed class GameStage : Stage
 
         Game.AudioPlayer.Stop();
 
+        // Anchor the HUD to the (now enlarged) in-game window.
+        RelayoutHud();
+
         // Subscribe to the channel-server SetField so we can load the real map
         // + spawn position when the migration handoff completes.
         Game.FieldHandlers.OnSetField += OnSetField;
@@ -689,8 +708,26 @@ public sealed class GameStage : Stage
         _logger.LogInformation("GameStage entered — awaiting SetField from channel");
     }
 
+    /// <summary>
+    /// Re-anchor every HUD panel to the active window size. Edge-anchored panels
+    /// (status bar, chat, buff list, loot messages) override
+    /// <see cref="GamePanel.Relayout"/>; the quit overlay is recentred
+    /// separately. Toggle windows (inventory, skills, …) keep their authored
+    /// positions — they stay fully on-screen at the larger in-game resolution.
+    /// </summary>
+    private void RelayoutHud()
+    {
+        var pp = GraphicsDevice.PresentationParameters;
+        var w = pp.BackBufferWidth;
+        var h = pp.BackBufferHeight;
+        foreach (var p in _panels) p.Relayout(w, h);
+        _quitConfirm?.Relayout(w, h);
+    }
+
     public override void OnExit()
     {
+        // Restore the login-flow window size we enlarged from in OnEnter.
+        Game.ResizeWindow(_prevW, _prevH);
         // OnSetField uses a named method — safe to unsubscribe
         Game.FieldHandlers.OnSetField -= OnSetField;
         // Lambda subscriptions will be cleaned up when FieldHandlers is
@@ -1137,6 +1174,12 @@ public sealed class GameStage : Stage
             _player.Update(dt, _moveLeft, _moveRight, _jumpPressed);
             _camera.Target = _player.Position;
         }
+        // Keep the camera's view size in step with the live backbuffer so the
+        // world→screen transform stays correct after a resolution change (map
+        // entry, or returning from the cash shop).
+        var camPp = GraphicsDevice.PresentationParameters;
+        _camera.ViewWidth = camPp.BackBufferWidth;
+        _camera.ViewHeight = camPp.BackBufferHeight;
         _camera.Update(dt);
 
         // NPCs

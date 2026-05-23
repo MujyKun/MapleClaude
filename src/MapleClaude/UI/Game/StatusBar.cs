@@ -8,7 +8,9 @@ using Microsoft.Xna.Framework.Input;
 namespace MapleClaude.UI.Game;
 
 /// <summary>
-/// Bottom status bar. Always visible at y=480 on 800x600.
+/// Bottom status bar. Anchored to the bottom of the window and centred
+/// horizontally, so it reflows when the window resizes (login 800×600 →
+/// in-game 1024×768) via <see cref="Relayout"/>.
 ///
 /// Layout (fallback mode, no WZ):
 ///   [Lv.N Name] [HP bar] [MP bar]   [quickslot 0-7]   [CHR][CMM][EV][MENU][CS]
@@ -81,17 +83,28 @@ public sealed class StatusBar : GamePanel
     // Pre-computed gauge values
     private float _hpPct, _mpPct, _expPct;
 
-    // Constants matching v95 800x600 layout
-    private const int BarY     = 480;
-    private const int GaugeX   = 130;
-    private const int HpY      = 487;
-    private const int MpY      = 502;
+    // ── Resolution-aware layout ──────────────────────────────────────────────
+    // The bar anchors to the bottom of the window and centres its 800-wide
+    // graphic horizontally. Every anchor below is expressed relative to the
+    // viewport so it reflows when the window resizes (login 800×600 → in-game
+    // 1024×768); each formula evaluates to the original 800×600 constant when
+    // _viewW=800, _viewH=600, so the historical layout is preserved exactly.
+    private int _viewW = 800;
+    private int _viewH = 600;
+
+    private int CenterX => _viewW / 2;          // 400 @ 800 — bar graphic centre
+    private int BgLeft  => _viewW / 2 - 400;    //   0 @ 800 — left edge of the bar
+    private int BarY     => _viewH - 120;        // 480 @ 600 — top of the bar band
+    private int GaugeX   => BgLeft + 130;        // 130 @ 800
+    private int HpY      => BarY + 7;            // 487 @ 600
+    private int MpY      => BarY + 22;           // 502 @ 600
+    private int ExpY     => BarY - 3;            // 477 @ 600
+    private int QsBaseX  => BgLeft + 270;        // 270 @ 800
+    private int QsY      => BarY + 4;            // 484 @ 600
+
     private const int GaugeW   = 139;
     private const int GaugeH   = 10;
-    private const int ExpY     = 477;
     private const int ExpH     = 4;
-    private const int QsBaseX  = 270;
-    private const int QsY      = 484;
 
     public StatusBar(WzTextureLoader loader, WzPackage? ui, BuiltInFont? font)
     {
@@ -173,10 +186,19 @@ public sealed class StatusBar : GamePanel
 
     private void LayoutMainButtons()
     {
-        // Right-side cluster, 24px spacing, bottom row
+        // Right-side cluster, 26px spacing, bottom row — anchored to the bar
+        // graphic so it stays put when the window is wider than 800.
         var btns = new[] { _btCharacter, _btCommunity, _btEvent, _btMenu, _btCashShop };
         for (var i = 0; i < btns.Length; i++)
-            if (btns[i] != null) btns[i]!.Position = new Vector2(632 + i * 26, BarY + 11);
+            if (btns[i] != null) btns[i]!.Position = new Vector2(BgLeft + 632 + i * 26, BarY + 11);
+    }
+
+    public override void Relayout(int viewWidth, int viewHeight)
+    {
+        _viewW = viewWidth;
+        _viewH = viewHeight;
+        Position = new Vector2(0, BarY);
+        LayoutMainButtons();
     }
 
     public override void Update(GameTime gt)
@@ -192,15 +214,15 @@ public sealed class StatusBar : GamePanel
 
         // ── Background ──────────────────────────────────────────────────────
         if (_barBg != null)
-            _barBg.Draw(sb, new Vector2(400, BarY + 10));
+            _barBg.Draw(sb, new Vector2(CenterX, BarY + 10));
         else
         {
-            sb.Draw(white, new Rectangle(0, BarY, 800, 40), new Color(18, 18, 28));
-            sb.Draw(white, new Rectangle(0, BarY - 1, 800, 1), new Color(60, 60, 80));
+            sb.Draw(white, new Rectangle(0, BarY, _viewW, 40), new Color(18, 18, 28));
+            sb.Draw(white, new Rectangle(0, BarY - 1, _viewW, 1), new Color(60, 60, 80));
         }
 
-        // ── EXP bar ─────────────────────────────────────────────────────────
-        DrawGauge(sb, white, new Rectangle(0, ExpY, 800, ExpH), _expPct,
+        // ── EXP bar (spans the full window width along the bottom) ───────────
+        DrawGauge(sb, white, new Rectangle(0, ExpY, _viewW, ExpH), _expPct,
             new Color(220, 180, 40), new Color(80, 60, 0, 160));
 
         // ── HP gauge ────────────────────────────────────────────────────────
@@ -216,8 +238,8 @@ public sealed class StatusBar : GamePanel
             $"{Mp}/{MaxMp}", new Color(180, 200, 255));
 
         // ── Level + name ────────────────────────────────────────────────────
-        _font?.Draw(sb, $"Lv.{Level}", new Vector2(6, BarY + 5), new Color(240, 220, 100));
-        _font?.Draw(sb, CharName,      new Vector2(6, BarY + 18), Color.White);
+        _font?.Draw(sb, $"Lv.{Level}", new Vector2(BgLeft + 6, BarY + 5), new Color(240, 220, 100));
+        _font?.Draw(sb, CharName,      new Vector2(BgLeft + 6, BarY + 18), Color.White);
 
         // ── HP/MP labels ────────────────────────────────────────────────────
         _font?.Draw(sb, "HP", new Vector2(GaugeX - 22, HpY), new Color(255, 120, 120));
@@ -309,7 +331,7 @@ public sealed class StatusBar : GamePanel
             if (b.HandleMouseButton(x, y, down)) return true;
 
         // Claim any click on bar area so it doesn't fall through to game
-        return new Rectangle(0, BarY - 4, 800, 44).Contains(x, y);
+        return new Rectangle(0, BarY - 4, _viewW, 44).Contains(x, y);
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────

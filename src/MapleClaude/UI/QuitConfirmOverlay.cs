@@ -16,7 +16,9 @@ public sealed class QuitConfirmOverlay : Overlay
     private readonly Button? _btYes;
     private readonly Button? _btNo;
     private readonly BuiltInFont? _font;
-    private readonly Vector2 _center;
+    private Vector2 _center;
+    private int _viewW = 800;
+    private int _viewH = 600;
 
     public Action? OnYes { get; set; }
     public Action? OnNo { get; set; }
@@ -49,12 +51,25 @@ public sealed class QuitConfirmOverlay : Overlay
         }
     }
 
+    /// <summary>
+    /// Recentre the dialog (and resize the dim layer) for the active viewport.
+    /// Called when the in-game window resolution changes.
+    /// </summary>
+    public void Relayout(int viewWidth, int viewHeight)
+    {
+        _viewW = viewWidth;
+        _viewH = viewHeight;
+        _center = new Vector2(viewWidth / 2f, viewHeight / 2f);
+        if (_btYes != null) _btYes.Position = _center + new Vector2(-40, 36);
+        if (_btNo  != null) _btNo.Position  = _center + new Vector2(40, 36);
+    }
+
     public override void Draw(SpriteBatch sb, Texture2D white)
     {
         if (!IsVisible) return;
 
-        // Dim background.
-        sb.Draw(white, new Rectangle(0, 0, 800, 600), new Color(0, 0, 0, 100));
+        // Dim the whole window.
+        sb.Draw(white, new Rectangle(0, 0, _viewW, _viewH), new Color(0, 0, 0, 100));
 
         if (_background != null)
         {
