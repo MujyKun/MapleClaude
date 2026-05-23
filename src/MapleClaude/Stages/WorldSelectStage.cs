@@ -35,6 +35,10 @@ public sealed class WorldSelectStage : Stage
     private const int WorldGridCols = 6;                       // 96·(i%6), 26·(i/6)
     private static readonly Vector2 WorldGridStep = new(96, 26);
     private static readonly Vector2 WorldFlagOffset = new(78, 6);
+    // World-button 0 in login-MAP coordinates: CUIWorldSelect dialog CreateDlg(-249,-862)
+    // + world-info layer RelMove(-10,-10). The signboard map object sits at (31,-808) in
+    // the same space, so the buttons land on the board automatically via the camera.
+    private static readonly Vector2 WorldGridOriginMap = new(-259, -872);
     private const int ChannelGridCols = 5;                     // 66·(i%5)+23, 29·(i/5)+93
     private static readonly Vector2 ChannelGridBase = new(23, 93);
     private static readonly Vector2 ChannelGridStep = new(66, 29);
@@ -71,10 +75,12 @@ public sealed class WorldSelectStage : Stage
     private WzSprite? _selectWorldTitle;
 
     // ---- WorldList layer assets ----
+    // The board the world list sits on (Map/Obj/login.img/WorldSelect/signboard) and
+    // the world decorations are rendered natively by MapScene from the login map's
+    // object layers — the world buttons below are placed in the same map space.
     private readonly List<Button> _worldButtons = new();
     private readonly List<WzSprite?> _worldFlags = new();
-    private Button? _btVAC;
-    private Button? _btViewChoice;
+    private Button? _btExit;   // back to title/login (Common/BtExit; client's GotoTitle)
 
     // ---- ChannelGrid layer assets ----
     private WzSprite? _chBackgrn;
@@ -85,15 +91,15 @@ public sealed class WorldSelectStage : Stage
     private readonly WzSprite?[] _channelNormal = new WzSprite?[20];
     private readonly WzSprite?[] _channelDisabled = new WzSprite?[20];
 
-    // ---- Tunable anchors (screen-space; debug-window editable) ----
-    // World grid is auto-centred horizontally on load; Y is the tunable row top.
-    private Vector2 _worldGridAnchor = new(118, 188);
+    // ---- Tunable knobs (debug-window editable) ----
+    // World buttons are placed at WorldGridOriginMap in login-map space; this nudge
+    // (map units) is only for fine adjustment — default 0 (authentic).
+    private Vector2 _worldGridNudge = Vector2.Zero;
     private Vector2 _channelPanelAnchor = new(214, 189); // (800-371)/2, (600-222)/2
     private Vector2 _worldBannerOffset = new(12, 6);      // world banner inside panel
     private Vector2 _chSelectOffset = new(-2, -3);        // highlight centred over cell
     private Vector2 _chGaugeOffset = new(2, 15);          // gauge inside cell
-    private Vector2 _btVacPos = new(700, 80);
-    private Vector2 _btViewChoicePos = new(620, 80);
+    private Vector2 _btExitPos = new(0, 546);             // BtExit screen-space, CUILoginStart (0,546)
 
     public WorldSelectStage(
         ILogger<WorldSelectStage> logger,
@@ -135,11 +141,7 @@ public sealed class WorldSelectStage : Stage
         _frame = LoadCanvas("Login.img/Common/frame");
         _stepIndicator = LoadCanvas("Login.img/Common/step/1");
         _selectWorldTitle = LoadCanvas("Login.img/Common/selectWorld");
-
-        _btVAC = MakeButton("Login.img/ViewAllChar/BtVAC",
-            () => _logger.LogInformation("BtVAC (View All Char) clicked (no-op placeholder)"));
-        _btViewChoice = MakeButton("Login.img/WorldSelect/BtViewChoice",
-            () => _logger.LogInformation("BtViewChoice clicked (no-op placeholder)"));
+        _btExit = MakeButton("Login.img/Common/BtExit", GoBackToLogin);
 
         RegisterDebugItems();
 
@@ -258,14 +260,14 @@ public sealed class WorldSelectStage : Stage
 
     private void DrawWorldList(SpriteBatch sb)
     {
+        // The signboard + world decorations are drawn by MapScene (login-map obj layers).
         for (var i = 0; i < _worldButtons.Count; i++)
         {
             _worldButtons[i].Draw(sb);
             var flag = i < _worldFlags.Count ? _worldFlags[i] : null;
             flag?.Draw(sb, _worldButtons[i].Position + WorldFlagOffset);
         }
-        _btVAC?.Draw(sb);
-        _btViewChoice?.Draw(sb);
+        _btExit?.Draw(sb);
     }
 
     private void DrawChannelGrid(SpriteBatch sb)
@@ -328,6 +330,10 @@ public sealed class WorldSelectStage : Stage
 
         if (_subScreen == SubScreen.WorldList)
         {
+            if (_btExit?.HandleMouseButton(x, y, down) == true)
+            {
+                return;
+            }
             foreach (var bt in _worldButtons)
             {
                 if (bt.HandleMouseButton(x, y, down))
@@ -335,11 +341,6 @@ public sealed class WorldSelectStage : Stage
                     return;
                 }
             }
-            if (_btVAC?.HandleMouseButton(x, y, down) == true)
-            {
-                return;
-            }
-            _btViewChoice?.HandleMouseButton(x, y, down);
             return;
         }
 
@@ -375,7 +376,14 @@ public sealed class WorldSelectStage : Stage
             _logger.LogInformation("Backspace — leaving channel grid, back to world list");
             return;
         }
-        _logger.LogInformation("Backspace — returning to LoginStage");
+        GoBackToLogin();
+    }
+
+    // Back from the world list returns to the title/login screen — the client's
+    // CLogin::GotoTitle path (BtExit click or ESC/Backspace at the base step).
+    private void GoBackToLogin()
+    {
+        _logger.LogInformation("Back — returning to LoginStage (GotoTitle)");
         Game.StageDirector.Replace(new LoginStage(
             _loggerFactory.CreateLogger<LoginStage>(),
             _loggerFactory, _ui, _map, _sound));
@@ -408,12 +416,6 @@ public sealed class WorldSelectStage : Stage
                 : null);
         }
 
-        // Centre the used columns horizontally on the 800-wide backbuffer.
-        var usedCols = Math.Min(_worldButtons.Count, WorldGridCols);
-        if (usedCols > 0)
-        {
-            _worldGridAnchor.X = 400f - usedCols * WorldGridStep.X / 2f;
-        }
         _logger.LogInformation("Built {N} world buttons", _worldButtons.Count);
     }
 
@@ -512,20 +514,23 @@ public sealed class WorldSelectStage : Stage
 
     private void ApplyLayout()
     {
-        for (var i = 0; i < _worldButtons.Count; i++)
+        // World buttons live in login-map space and ride the camera, so they sit on
+        // the map-rendered signboard regardless of scroll.
+        if (_scene is not null && _worldButtons.Count > 0)
         {
-            var col = i % WorldGridCols;
-            var row = i / WorldGridCols;
-            _worldButtons[i].Position = _worldGridAnchor
-                + new Vector2(col * WorldGridStep.X, row * WorldGridStep.Y);
+            var pp = GraphicsDevice.PresentationParameters;
+            var origin = WorldGridOriginMap + _worldGridNudge;
+            for (var i = 0; i < _worldButtons.Count; i++)
+            {
+                var col = i % WorldGridCols;
+                var row = i / WorldGridCols;
+                var mapPos = origin + new Vector2(col * WorldGridStep.X, row * WorldGridStep.Y);
+                _worldButtons[i].Position = _scene.WorldToScreen(mapPos, pp.BackBufferWidth, pp.BackBufferHeight);
+            }
         }
-        if (_btVAC != null)
+        if (_btExit != null)
         {
-            _btVAC.Position = _btVacPos;
-        }
-        if (_btViewChoice != null)
-        {
-            _btViewChoice.Position = _btViewChoicePos;
+            _btExit.Position = _btExitPos;
         }
         if (_btGoWorld != null)
         {
@@ -543,12 +548,10 @@ public sealed class WorldSelectStage : Stage
         var reg = Game.DebugRegistry;
         reg.Register(new DebugItem(WlCat, "Camera offset (SP +)",
             () => _cameraOffset, v => _cameraOffset = v) { Draggable = false });
-        reg.Register(new DebugItem(WlCat, "World grid anchor",
-            () => _worldGridAnchor, v => _worldGridAnchor = v));
-        reg.Register(new DebugItem(WlCat, "BtVAC",
-            () => _btVacPos, v => _btVacPos = v));
-        reg.Register(new DebugItem(WlCat, "BtViewChoice",
-            () => _btViewChoicePos, v => _btViewChoicePos = v));
+        reg.Register(new DebugItem(WlCat, "World grid nudge (map)",
+            () => _worldGridNudge, v => _worldGridNudge = v) { Draggable = false });
+        reg.Register(new DebugItem(WlCat, "BtExit (back)",
+            () => _btExitPos, v => _btExitPos = v));
 
         reg.Register(new DebugItem(ChCat, "Panel anchor (chBackgrn TL)",
             () => _channelPanelAnchor, v => _channelPanelAnchor = v));
@@ -564,9 +567,8 @@ public sealed class WorldSelectStage : Stage
     {
         var reg = Game.DebugRegistry;
         reg.Unregister(WlCat, "Camera offset (SP +)");
-        reg.Unregister(WlCat, "World grid anchor");
-        reg.Unregister(WlCat, "BtVAC");
-        reg.Unregister(WlCat, "BtViewChoice");
+        reg.Unregister(WlCat, "World grid nudge (map)");
+        reg.Unregister(WlCat, "BtExit (back)");
         reg.Unregister(ChCat, "Panel anchor (chBackgrn TL)");
         reg.Unregister(ChCat, "World banner offset");
         reg.Unregister(ChCat, "chSelect offset");
