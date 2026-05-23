@@ -13,7 +13,9 @@ namespace MapleClaude.UI.Game;
 /// </summary>
 public sealed class Shop : GamePanel
 {
-    private sealed record ShopItem(string Name, int ItemId, int Price, bool Buyable = true);
+    /// <summary>A shop row. For Buy, <c>Slot</c> is the shop index; for Sell it's
+    /// the inventory position.</summary>
+    public sealed record ShopItem(string Name, int ItemId, int Price, short Quantity, int Slot);
 
     private readonly WzSprite? _background;
     private readonly Button? _btClose;
@@ -24,30 +26,25 @@ public sealed class Shop : GamePanel
     private int  _scroll;
     private int  _selected = -1;
 
-    private static readonly ShopItem[] _buyItems =
-    [
-        new("Red Potion",            2000000,     50),
-        new("Orange Potion",         2000001,    150),
-        new("White Potion",          2000002,    500),
-        new("Blue Potion",           2000003,    150),
-        new("Mana Elixir",           2000005,   3000),
-        new("Power Elixir",          2000006,   5000),
-        new("Antidote",              2050001,    100),
-        new("Eye Drops",             2050000,    100),
-        new("Return Scroll to Town", 2030000,   2000),
-        new("Magic Rock",            4006000,   5000),
-        new("Summoning Sack (Blue)", 2270000,   1500),
-        new("Arrow for Bow",         2060000,     10),
-    ];
+    private readonly List<ShopItem> _buyItems = new();
+    private readonly List<ShopItem> _sellItems = new();
 
-    private static readonly ShopItem[] _sellItems =
-    [
-        new("Blue Snail Shell",   4000000,  10,  false),
-        new("Snail Shell",        4000001,   6,  false),
-        new("Red Snail Shell",    4000002,  25,  false),
-        new("Mushroom",           4000010,  14,  false),
-        new("Firewood",           4020007,  30,  false),
-    ];
+    /// <summary>Buy: (shopSlot, itemId, price, count).</summary>
+    public Action<int, int, int, short>? OnBuy { get; set; }
+    /// <summary>Sell: (inventoryPos, itemId, count).</summary>
+    public Action<short, int, short>? OnSell { get; set; }
+    /// <summary>Fired when the shop dialog closes (send the close request).</summary>
+    public Action? OnClosed { get; set; }
+
+    /// <summary>Populate the buy list from a server OpenShopDlg and the sell list
+    /// from the player's current inventory, then show the panel.</summary>
+    public void OpenShop(IEnumerable<ShopItem> buy, IEnumerable<ShopItem> sell)
+    {
+        _buyItems.Clear(); _buyItems.AddRange(buy);
+        _sellItems.Clear(); _sellItems.AddRange(sell);
+        _tab = 0; _scroll = 0; _selected = -1;
+        IsVisible = true;
+    }
 
     private const int PanelW   = 436;
     private const int PanelH   = 344;
@@ -65,12 +62,18 @@ public sealed class Shop : GamePanel
         var shop = ui?.GetItem("UIWindow.img/Shop") as WzProperty;
         _background = shop?.Get("backgrnd") is WzCanvas bc ? loader.Load(bc) : null;
 
-        _btClose = MakeButton(loader, shop, "BtClose", () => IsVisible = false);
+        _btClose = MakeButton(loader, shop, "BtClose", Close);
 
         ApplyLayout();
     }
 
-    private ShopItem[] CurrentList => _tab == 0 ? _buyItems : _sellItems;
+    private IReadOnlyList<ShopItem> CurrentList => _tab == 0 ? _buyItems : _sellItems;
+
+    private void Close()
+    {
+        IsVisible = false;
+        OnClosed?.Invoke();
+    }
 
     private void ApplyLayout()
     {
@@ -106,23 +109,23 @@ public sealed class Shop : GamePanel
 
         // Item list
         var list  = CurrentList;
-        var maxSc = Math.Max(0, list.Length - VisRows);
+        var maxSc = Math.Max(0, list.Count - VisRows);
         _scroll   = Math.Clamp(_scroll, 0, maxSc);
 
         for (var i = 0; i < VisRows; i++)
         {
             var idx = i + _scroll;
-            if (idx >= list.Length) break;
+            if (idx >= list.Count) break;
             var isSelected = idx == _selected;
             DrawItem(sb, white, list[idx], px + 6, py + ListTop + i * ItemH, isSelected);
         }
 
         // Scroll bar (right edge)
-        if (list.Length > VisRows)
+        if (list.Count > VisRows)
         {
             var trackH   = ListBot - ListTop;
-            var thumbH   = Math.Max(20, trackH * VisRows / list.Length);
-            var thumbY   = list.Length > 1 ? _scroll * (trackH - thumbH) / (list.Length - VisRows) : 0;
+            var thumbH   = Math.Max(20, trackH * VisRows / list.Count);
+            var thumbY   = list.Count > 1 ? _scroll * (trackH - thumbH) / (list.Count - VisRows) : 0;
             sb.Draw(white, new Rectangle(px + PanelW - 14, py + ListTop, 10, trackH), new Color(25, 25, 50));
             sb.Draw(white, new Rectangle(px + PanelW - 14, py + ListTop + thumbY, 10, thumbH), new Color(80, 70, 120));
         }
@@ -168,9 +171,9 @@ public sealed class Shop : GamePanel
         _font?.Draw(sb, priceStr, new Vector2(x + 48, y + 33), new Color(255, 220, 80));
     }
 
-    private void DrawActionBar(SpriteBatch sb, Texture2D white, int px, int py, ShopItem[] list)
+    private void DrawActionBar(SpriteBatch sb, Texture2D white, int px, int py, IReadOnlyList<ShopItem> list)
     {
-        if (_selected >= 0 && _selected < list.Length)
+        if (_selected >= 0 && _selected < list.Count)
         {
             var item    = list[_selected];
             var btnColor = new Color(50, 100, 160);
@@ -206,7 +209,7 @@ public sealed class Shop : GamePanel
             for (var i = 0; i < VisRows; i++)
             {
                 var idx = i + _scroll;
-                if (idx >= list.Length) break;
+                if (idx >= list.Count) break;
                 var itemRect = new Rectangle(px + 6, py + ListTop + i * ItemH + 1, PanelW - 20, ItemH - 2);
                 if (itemRect.Contains(x, y)) { _selected = idx; return true; }
             }
@@ -216,15 +219,17 @@ public sealed class Shop : GamePanel
             {
                 var rel    = y - (py + ListTop);
                 var trackH = ListBot - ListTop;
-                _scroll = Math.Clamp(rel * list.Length / trackH, 0, Math.Max(0, list.Length - VisRows));
+                _scroll = Math.Clamp(rel * list.Count / trackH, 0, Math.Max(0, list.Count - VisRows));
                 return true;
             }
 
-            // Action button
+            // Action button → Buy / Sell the selected row.
             var actBtn = new Rectangle(px + PanelW - 80, py + ListBot + 8, 68, 22);
-            if (actBtn.Contains(x, y) && _selected >= 0)
+            if (actBtn.Contains(x, y) && _selected >= 0 && _selected < CurrentList.Count)
             {
-                // Buy/Sell action — placeholder (no packet yet)
+                var item = CurrentList[_selected];
+                if (_tab == 0) OnBuy?.Invoke(item.Slot, item.ItemId, item.Price, 1);
+                else           OnSell?.Invoke((short)item.Slot, item.ItemId, 1);
                 _selected = -1;
                 return true;
             }
@@ -236,10 +241,10 @@ public sealed class Shop : GamePanel
     public override bool OnKeyPress(Keys key)
     {
         if (!IsVisible) return false;
-        if (key == Keys.Escape) { IsVisible = false; return true; }
+        if (key == Keys.Escape) { Close(); return true; }
         var list = CurrentList;
-        if (key == Keys.Up   && _selected > 0)             { _selected--; ClampScrollToSelected(list.Length); return true; }
-        if (key == Keys.Down && _selected < list.Length-1) { _selected++; ClampScrollToSelected(list.Length); return true; }
+        if (key == Keys.Up   && _selected > 0)             { _selected--; ClampScrollToSelected(list.Count); return true; }
+        if (key == Keys.Down && _selected < list.Count-1) { _selected++; ClampScrollToSelected(list.Count); return true; }
         return true;
     }
 

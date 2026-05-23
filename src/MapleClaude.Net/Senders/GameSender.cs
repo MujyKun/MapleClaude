@@ -169,6 +169,49 @@ public static class GameSender
         return OutPacket.Of(InHeader.UserTransferFieldRequest);
     }
 
+    // ── NPC shop (UserShopRequest 66) ─────────────────────────────────────────────
+    // Mirrors kinoko ShopDialog.handlePacket (ShopRequestType: Buy=0 Sell=1 Recharge=2 Close=3).
+
+    // Buy(0): byte type, short shopSlot, int itemId, short count, int price.
+    public static OutPacket ShopBuy(short shopSlot, int itemId, short count, int price)
+    {
+        var p = OutPacket.Of(InHeader.UserShopRequest);
+        p.WriteByte(0);
+        p.WriteShort(shopSlot);
+        p.WriteInt(itemId);
+        p.WriteShort(count);
+        p.WriteInt(price);
+        return p;
+    }
+
+    // Sell(1): byte type, short pos, int itemId, short count.
+    public static OutPacket ShopSell(short pos, int itemId, short count)
+    {
+        var p = OutPacket.Of(InHeader.UserShopRequest);
+        p.WriteByte(1);
+        p.WriteShort(pos);
+        p.WriteInt(itemId);
+        p.WriteShort(count);
+        return p;
+    }
+
+    // Recharge(2): byte type, short pos.
+    public static OutPacket ShopRecharge(short pos)
+    {
+        var p = OutPacket.Of(InHeader.UserShopRequest);
+        p.WriteByte(2);
+        p.WriteShort(pos);
+        return p;
+    }
+
+    // Close(3): byte type, no body.
+    public static OutPacket ShopClose()
+    {
+        var p = OutPacket.Of(InHeader.UserShopRequest);
+        p.WriteByte(3);
+        return p;
+    }
+
     // UserSelectNpc(63): int objectId, short userX, short userY
     // (upstream UserHandler.handleUserSelectNpc reads the player's position).
     public static OutPacket UserSelectNpc(int npcObjId, short userX, short userY)

@@ -151,6 +151,9 @@ public sealed class ItemInventory : GamePanel
     public InvItem? ItemAt(int tab, int slot) =>
         _items.FirstOrDefault(i => i.Tab == tab && i.Slot == slot);
 
+    /// <summary>All inventory items (for the shop sell list).</summary>
+    public IReadOnlyList<InvItem> AllItems => _items;
+
     /// <summary>Slot (inventory position) of a consumable in the Use tab, or -1.
     /// Used to fire a key-bound item.</summary>
     public int FindUseSlot(int itemId)
