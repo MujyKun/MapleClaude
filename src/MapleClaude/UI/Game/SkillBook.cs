@@ -149,6 +149,9 @@ public sealed class SkillBook : GamePanel
     /// <summary>True if the skill is currently cooling down.</summary>
     public bool IsOnCooldown(int skillId) => _skills.Find(s => s.Id == skillId)?.Cooldown > 0;
 
+    /// <summary>Learned level of a skill, or 0 if not in the book / not learned.</summary>
+    public int LevelOf(int skillId) => _skills.Find(s => s.Id == skillId)?.Level ?? 0;
+
     private void LoadDefaultSkills()
     {
         // Beginner default skills

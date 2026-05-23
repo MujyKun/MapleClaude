@@ -136,6 +136,29 @@ public sealed class KeyConfig : GamePanel
         OnBindingsChanged?.Invoke();
     }
 
+    // ── Function bindings (skills / items / faces / macros bound to keys) ────────
+    // These coexist with the KeyAction bindings above: a key is either a KeyAction
+    // (panel toggle / in-game action / movement) or a FuncBind, never both.
+    public enum FuncBindType { Skill = 1, Item = 2, Face = 6, Macro = 8 }
+
+    public readonly record struct FuncBind(FuncBindType Type, int Id);
+
+    private readonly Dictionary<Keys, FuncBind> _funcBinds = new();
+
+    /// <summary>The skill/item/face/macro bound to a key, if any.</summary>
+    public FuncBind? GetFuncBind(Keys key) => _funcBinds.TryGetValue(key, out var b) ? b : null;
+
+    /// <summary>All function bindings (for persistence + the quick-slot bar).</summary>
+    public IReadOnlyDictionary<Keys, FuncBind> FuncBinds => _funcBinds;
+
+    /// <summary>Replace the live function bindings with a persisted layout.</summary>
+    public void LoadFuncBinds(IReadOnlyDictionary<Keys, FuncBind>? binds)
+    {
+        _funcBinds.Clear();
+        if (binds is null) return;
+        foreach (var (k, v) in binds) _funcBinds[k] = v;
+    }
+
     // ── Visual keyboard grid ──────────────────────────────────────────────────
     private static readonly (Keys key, string label)[][] KeyRows =
     [
@@ -327,24 +350,44 @@ public sealed class KeyConfig : GamePanel
             .Where(kv => kv.Value == KeyAction.MoveLeft || kv.Value == KeyAction.MoveRight)
             .ToList();
         _bindings.Clear();
+        _funcBinds.Clear();
         foreach (var (k, v) in clientOnly) _bindings[k] = v;
 
         foreach (var (keyIndex, type, actionId) in entries)
         {
             var key = ScanCodeToKeys(keyIndex);
             if (key == null || type == 0) continue;
-            var action = actionId switch
+            switch (type)
             {
-                var id when Enum.IsDefined(typeof(KeyAction), id) => (KeyAction)id,
-                _ => KeyAction.None,
-            };
-            if (action != KeyAction.None) _bindings[key.Value] = action;
+                case 1: _funcBinds[key.Value] = new FuncBind(FuncBindType.Skill, actionId); break;
+                case 2: _funcBinds[key.Value] = new FuncBind(FuncBindType.Item, actionId); break;
+                case 6: _funcBinds[key.Value] = new FuncBind(FuncBindType.Face, actionId); break;
+                case 8: _funcBinds[key.Value] = new FuncBind(FuncBindType.Macro, actionId); break;
+                default: // 4 = menu, 5 = action → a KeyAction
+                    if (Enum.IsDefined(typeof(KeyAction), actionId))
+                    {
+                        _bindings[key.Value] = (KeyAction)actionId;
+                    }
+                    break;
+            }
         }
     }
 
     // ── Update ────────────────────────────────────────────────────────────────
 
-    public override void Update(GameTime gt) => LayoutButtons();
+    private string? _warning;
+    private float _warningTimer;
+    private void SetWarning(string msg) { _warning = msg; _warningTimer = 3f; }
+
+    public override void Update(GameTime gt)
+    {
+        LayoutButtons();
+        if (_warningTimer > 0)
+        {
+            _warningTimer -= (float)gt.ElapsedGameTime.TotalSeconds;
+            if (_warningTimer <= 0) _warning = null;
+        }
+    }
 
     // ── Draw ──────────────────────────────────────────────────────────────────
 
@@ -377,6 +420,13 @@ public sealed class KeyConfig : GamePanel
                     new Color(255, 220, 60));
             }
         }
+        else if (_warning != null && _font != null)
+        {
+            var sz = _font.Measure(_warning);
+            _font.Draw(sb, _warning,
+                new Vector2(px + (PanelW - (int)sz.X) / 2, py + PanelH - 18),
+                new Color(255, 140, 90));
+        }
 
         DrawKeyGrid(sb, white, px, py);
         foreach (var b in _allButtons) b.Draw(sb);
@@ -403,7 +453,8 @@ public sealed class KeyConfig : GamePanel
     {
         var isTarget = _rebindTarget == key;
         _bindings.TryGetValue(key, out var action);
-        var hasBind  = action != KeyAction.None && action != default;
+        var func     = GetFuncBind(key);
+        var hasBind  = (action != KeyAction.None && action != default) || func is not null;
 
         Color fill   = isTarget ? new Color(80, 60, 20)
                      : hasBind  ? new Color(30, 40, 55)
@@ -418,10 +469,21 @@ public sealed class KeyConfig : GamePanel
         // Key name (top-left, dim)
         _font?.Draw(sb, keyLabel, new Vector2(x + 2, y + 1), new Color(130, 135, 170));
 
-        // Action label (bottom)
-        if (hasBind && ActionLabel.TryGetValue(action, out var al))
+        // Bound label (bottom): a function bind (skill/item/face/macro) or a KeyAction.
+        if (func is { } fb)
+            _font?.Draw(sb, FuncLabel(fb), new Vector2(x + 2, y + 13), new Color(230, 200, 150));
+        else if (action != KeyAction.None && ActionLabel.TryGetValue(action, out var al))
             _font?.Draw(sb, al, new Vector2(x + 2, y + 13), new Color(200, 220, 200));
     }
+
+    private static string FuncLabel(FuncBind fb) => fb.Type switch
+    {
+        FuncBindType.Skill => "SKL",
+        FuncBindType.Item  => "ITM",
+        FuncBindType.Face  => "FACE",
+        FuncBindType.Macro => "MAC",
+        _ => "?",
+    };
 
     // ── Input ─────────────────────────────────────────────────────────────────
 
@@ -463,12 +525,23 @@ public sealed class KeyConfig : GamePanel
         if (_rebindTarget.HasValue)
         {
             if (key == Keys.Escape) { _rebindTarget = null; return true; }
-            var oldAction = _bindings.TryGetValue(_rebindTarget.Value, out var a) ? a : KeyAction.None;
-            // Remove any existing binding for this physical key
+
+            var src = _rebindTarget.Value;
+            // Warn if the destination key already held a different binding.
+            if (key != src && (_bindings.ContainsKey(key) || _funcBinds.ContainsKey(key)))
+            {
+                SetWarning($"{SlotLabel(key)} was already bound — overwritten.");
+            }
+
+            // Move whatever the source slot held (KeyAction or FuncBind) onto the key.
+            var hadAction = _bindings.TryGetValue(src, out var oldAction);
+            var hadFunc = _funcBinds.TryGetValue(src, out var oldFunc);
             _bindings.Remove(key);
-            // Re-assign the action from the old slot to the new key
-            if (oldAction != KeyAction.None) _bindings[key] = oldAction;
-            _bindings.Remove(_rebindTarget.Value);
+            _funcBinds.Remove(key);
+            if (hadAction) _bindings[key] = oldAction;
+            else if (hadFunc) _funcBinds[key] = oldFunc;
+            _bindings.Remove(src);
+            _funcBinds.Remove(src);
             _rebindTarget = key;
             return true;
         }

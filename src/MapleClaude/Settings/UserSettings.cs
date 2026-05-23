@@ -14,6 +14,11 @@ namespace MapleClaude.Settings;
 public sealed class UserSettings
 {
     public Dictionary<string, string> KeyBindings { get; set; } = new();
+
+    /// <summary>Function-key bindings: <c>"&lt;Keys&gt;" → "&lt;typeInt&gt;:&lt;id&gt;"</c>
+    /// (e.g. <c>"F1" → "1:1001004"</c> for a skill).</summary>
+    public Dictionary<string, string> FuncBindings { get; set; } = new();
+
     public int BgmVolume { get; set; } = 80;
     public int SfxVolume { get; set; } = 100;
 

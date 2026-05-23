@@ -243,6 +243,7 @@ public sealed class GameStage : Stage
         // arrives later and overrides them via ApplyServerKeymap — server wins.
         var saved = Game.Settings.Load();
         _keyConfig.LoadBindings(ParseBindings(saved.KeyBindings));
+        _keyConfig.LoadFuncBinds(ParseFuncBinds(saved.FuncBindings));
         _optionMenu.LoadVolumes(saved.BgmVolume, saved.SfxVolume);
         ApplyAudioVolumes();
         _keyConfig.OnBindingsChanged += SaveSettings;
@@ -852,12 +853,35 @@ public sealed class GameStage : Stage
         return map;
     }
 
+    // Func bindings persist as "<Keys>" → "<typeInt>:<id>".
+    private static Dictionary<Keys, KeyConfig.FuncBind> ParseFuncBinds(Dictionary<string, string> raw)
+    {
+        var map = new Dictionary<Keys, KeyConfig.FuncBind>();
+        foreach (var (ks, vs) in raw)
+        {
+            var colon = vs.IndexOf(':');
+            if (colon <= 0) continue;
+            if (Enum.TryParse<Keys>(ks, out var key) &&
+                int.TryParse(vs.AsSpan(0, colon), out var typeInt) &&
+                int.TryParse(vs.AsSpan(colon + 1), out var id) &&
+                Enum.IsDefined(typeof(KeyConfig.FuncBindType), typeInt))
+            {
+                map[key] = new KeyConfig.FuncBind((KeyConfig.FuncBindType)typeInt, id);
+            }
+        }
+        return map;
+    }
+
     private void SaveSettings()
     {
         var s = Game.Settings.Load();
         if (_keyConfig != null)
+        {
             s.KeyBindings = _keyConfig.Bindings.ToDictionary(
                 kv => kv.Key.ToString(), kv => kv.Value.ToString());
+            s.FuncBindings = _keyConfig.FuncBinds.ToDictionary(
+                kv => kv.Key.ToString(), kv => $"{(int)kv.Value.Type}:{kv.Value.Id}");
+        }
         if (_optionMenu != null)
         {
             s.BgmVolume = _optionMenu.BgmVolume;
@@ -1394,8 +1418,36 @@ public sealed class GameStage : Stage
         // held key, so this discrete press doesn't interfere with jumping.
         if (key == Keys.Up && TryEnterPortal()) return;
 
-        // All other keys routed through KeyConfig bindings
+        // Skill / item / face keys (the player's func-key bindings) take precedence.
+        if (_keyConfig!.GetFuncBind(key) is { } funcBind) { DispatchFunc(funcBind); return; }
+
+        // All other keys routed through KeyConfig action bindings
         DispatchAction(_keyConfig!.GetAction(key));
+    }
+
+    // A skill/item/face/macro key binding (from the server keymap or the editor).
+    private void DispatchFunc(KeyConfig.FuncBind bind)
+    {
+        switch (bind.Type)
+        {
+            case KeyConfig.FuncBindType.Skill:
+                var level = _skill?.LevelOf(bind.Id) ?? 0;
+                if (level > 0) CastSkill(bind.Id, level);
+                break;
+            case KeyConfig.FuncBindType.Item:
+                UseItemById(bind.Id);
+                break;
+            // Face (emote) and Macro have no sender yet — bindings are stored/shown
+            // but firing them is a follow-up (UserEmotion / macro execution).
+        }
+    }
+
+    private void UseItemById(int itemId)
+    {
+        if (!Game.Session.IsConnected || _item is null) return;
+        var slot = _item.FindUseSlot(itemId);
+        if (slot <= 0) return;
+        Game.Session.Send(GameSender.UseItem((short)slot, itemId));
     }
 
     private void DispatchAction(KeyConfig.KeyAction action)
