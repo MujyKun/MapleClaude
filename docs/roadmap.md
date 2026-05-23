@@ -376,12 +376,18 @@ window shows participants; chat flows through the existing `ChatBar` via `/m`,
 joins, and chats. **Key files:** `UI/Game/{UserList,Messenger}.cs`,
 `Net/{Handlers,Senders}/*`.
 
-**Deferred — combat depth.** Outbound `MobMove(227)` for client-controlled mobs
-needs a mob-side physics simulation to synthesise a legitimate `MovePath` +
-`HackedCode` (a malformed packet would desync the IV chain — `GameStage.Update`
-keeps this suppressed with a one-shot debug log), and a server-accurate melee
-damage formula needs weapon/stat tables and live tuning. Both are intentionally
-left as a focused, carefully-validated follow-up rather than shipped blind.
+**Combat depth — partial.** Melee damage now scales with the character:
+`MeleeDamage.Estimate` (job → primary/secondary stat, level, stats) replaces the
+flat random roll in `GameStage`'s attack path, and is unit-tested. It is an
+honest client-side estimate — the v95 server trusts client damage, and true
+byte-accuracy would need the equipped weapon's attack + class multiplier
+(Item.wz) and skill mastery.
+
+**Still deferred.** Outbound `MobMove(227)` for client-controlled mobs needs a
+mob-side physics simulation to synthesise a legitimate `MovePath` + `HackedCode`
+(a malformed packet would desync the IV chain — `GameStage.Update` keeps this
+suppressed with a one-shot debug log). Left as a focused, carefully-validated
+follow-up rather than shipped blind.
 
 ## Conventions across phases
 
