@@ -82,6 +82,7 @@ public enum InHeader : short
     UserQuestRequest = 119,
     GroupMessage = 140,
     Whisper = 141,
+    Messenger = 143,
     PartyRequest = 145,
     GuildRequest = 149,
     FriendRequest = 153,
@@ -168,4 +169,5 @@ public enum OutHeader : short
     OpenShopDlg = 364,
     ShopResult = 365,
     TrunkResult = 368,
+    Messenger = 372,
 }

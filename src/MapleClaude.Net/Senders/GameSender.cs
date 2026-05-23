@@ -275,6 +275,46 @@ public static class GameSender
         return p;
     }
 
+    // ── Maple Messenger (Messenger 143) ───────────────────────────────────────────
+    // Mirrors kinoko UserHandler.handleMessenger (MessengerProtocol: Enter=0 Leave=2
+    // Invite=3 Chat=6). The window is opened client-side by sending Enter with a
+    // messengerId of 0 (create a new room) or an invite's dwSN (join that room).
+
+    // Enter(0): byte action, int messengerId (dwJoinSN; 0 to create a new room).
+    public static OutPacket MessengerEnter(int messengerId)
+    {
+        var p = OutPacket.Of(InHeader.Messenger);
+        p.WriteByte(0);
+        p.WriteInt(messengerId);
+        return p;
+    }
+
+    // Leave(2): byte action, no body.
+    public static OutPacket MessengerLeave()
+    {
+        var p = OutPacket.Of(InHeader.Messenger);
+        p.WriteByte(2);
+        return p;
+    }
+
+    // Invite(3): byte action, string targetName.
+    public static OutPacket MessengerInvite(string targetName)
+    {
+        var p = OutPacket.Of(InHeader.Messenger);
+        p.WriteByte(3);
+        p.WriteString(targetName);
+        return p;
+    }
+
+    // Chat(6): byte action, string message.
+    public static OutPacket MessengerChat(string text)
+    {
+        var p = OutPacket.Of(InHeader.Messenger);
+        p.WriteByte(6);
+        p.WriteString(text);
+        return p;
+    }
+
     // ── Quests (UserQuestRequest 119) ─────────────────────────────────────────────
     // Mirrors kinoko QuestHandler (QuestRequestType: Accept=1 Complete=2 Resign=3).
 

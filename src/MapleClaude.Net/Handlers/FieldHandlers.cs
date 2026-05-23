@@ -85,6 +85,9 @@ public sealed class FieldHandlers
     // ── Player storage / trunk ──────────────────────────────────────────────────
     public event Action<TrunkResultArgs>?       OnTrunkResult;
 
+    // ── Maple Messenger ─────────────────────────────────────────────────────────
+    public event Action<MessengerResultArgs>?   OnMessengerResult;
+
     // ── Quests ────────────────────────────────────────────────────────────────────
     /// <summary>A quest record changed (Message QuestRecord / QuestRecordEx).</summary>
     public event Action<QuestRecordArgs>?       OnQuestRecord;
@@ -145,6 +148,7 @@ public sealed class FieldHandlers
         OnShopOpen            = null;
         OnShopResult          = null;
         OnTrunkResult         = null;
+        OnMessengerResult     = null;
         OnQuestRecord         = null;
         OnSkillRecordResult   = null;
         OnTemporaryStatSet    = null;
@@ -183,6 +187,7 @@ public sealed class FieldHandlers
         router.Register(OutHeader.OpenShopDlg,         (p, s) => HandleOpenShopDlg(p));
         router.Register(OutHeader.ShopResult,          (p, s) => HandleShopResult(p));
         router.Register(OutHeader.TrunkResult,         (p, s) => HandleTrunkResult(p));
+        router.Register(OutHeader.Messenger,           (p, s) => HandleMessenger(p));
         router.Register(OutHeader.FuncKeyMappedInit,   (p, s) => HandleFuncKeyMappedInit(p));
         router.Register(OutHeader.FootHoldInfo,        (p, s) => HandleFootHoldInfo(p));
         router.Register(OutHeader.ChangeSkillRecordResult, (p, s) => HandleChangeSkillRecord(p));
@@ -1311,6 +1316,73 @@ public sealed class FieldHandlers
             });
         }
     }
+
+    // ── Maple Messenger ───────────────────────────────────────────────────────────
+    // Messenger(372): byte action (MessengerProtocol), then per action:
+    //   Enter(0): byte idx, AvatarLook, string name, byte channel, byte isNew
+    //   SelfEnterResult(1)/Leave(2): byte idx
+    //   Invite(3): string inviter, byte channel, int dwSN, byte admin
+    //   InviteResult(4): string name, byte success
+    //   Blocked(5): string name, byte blocked
+    //   Chat(6): string text
+    //   Avatar(7): byte idx, AvatarLook
+    //   Migrated(8): { byte idx, AvatarLook, string name, byte channel }* then byte 0xFF
+    private void HandleMessenger(InPacket p)
+    {
+        var action = p.ReadByte();
+        var args = new MessengerResultArgs { Action = action };
+        try
+        {
+            switch (action)
+            {
+                case 0:  // Enter
+                    args.UserIndex = p.ReadByte();
+                    AvatarCodec.DecodeAvatarLook(p);   // consume avatar (name follows it)
+                    args.Name = p.ReadString();
+                    args.Channel = p.ReadByte();
+                    args.Flag = p.ReadBool();          // bNew
+                    break;
+                case 1:  // SelfEnterResult
+                case 2:  // Leave
+                    args.UserIndex = p.ReadByte();
+                    break;
+                case 3:  // Invite
+                    args.Name = p.ReadString();        // inviter
+                    args.Channel = p.ReadByte();
+                    args.MessengerId = p.ReadInt();    // dwSN
+                    p.ReadByte();                      // admin
+                    break;
+                case 4:  // InviteResult
+                    args.Name = p.ReadString();
+                    args.Flag = p.ReadBool();          // success
+                    break;
+                case 5:  // Blocked
+                    args.Name = p.ReadString();
+                    args.Flag = p.ReadBool();          // blocked
+                    break;
+                case 6:  // Chat
+                    args.Chat = p.ReadString();
+                    break;
+                case 7:  // Avatar
+                    args.UserIndex = p.ReadByte();
+                    AvatarCodec.DecodeAvatarLook(p);
+                    break;
+                case 8:  // Migrated
+                    while (true)
+                    {
+                        int idx = p.ReadByte();
+                        if (idx == 0xFF) break;        // -1 terminator
+                        AvatarCodec.DecodeAvatarLook(p);
+                        var name = p.ReadString();
+                        var ch = p.ReadByte();
+                        args.Migrated.Add((idx, name, ch));
+                    }
+                    break;
+            }
+        }
+        catch (Exception) { /* trailing fields are best-effort */ }
+        OnMessengerResult?.Invoke(args);
+    }
 }
 
 // ── Argument types ────────────────────────────────────────────────────────────
@@ -1451,6 +1523,18 @@ public sealed class TrunkItemArg
     public int  PositionInType;           // index within the type block → GetItem position
     public int  ItemId;
     public int  Quantity;
+}
+
+public sealed class MessengerResultArgs
+{
+    public byte    Action;                // MessengerProtocol (Enter=0 … Migrated=8)
+    public int     UserIndex;             // Enter / SelfEnterResult / Leave / Avatar slot
+    public string? Name;                  // Enter name / Invite inviter / InviteResult / Blocked
+    public byte    Channel;               // Enter / Invite channel
+    public bool    Flag;                  // Enter isNew / InviteResult success / Blocked blocked
+    public int     MessengerId;           // Invite dwSN (use to join)
+    public string? Chat;                  // Chat text
+    public List<(int Index, string Name, byte Channel)> Migrated = new();
 }
 
 public sealed class LootMessageArgs
