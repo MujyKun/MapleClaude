@@ -279,18 +279,30 @@ duplicate-binding warning.
 reflects bindings; layout persists (Phase 10 store). **Key files:**
 `UI/Game/{KeyConfig,QuickSlots,SkillBook,ItemInventory}.cs`.
 
-## Phase 17 — In-game presentation (resolution + HUD)
+## Phase 17 — In-game presentation (resolution + HUD) (shipped)
 
-**Scope.** On character-select → map entry, switch the window from the 800×600
-login resolution to the in-game resolution and load the player's map at that size;
-restore on return to login (reuse `MapleClaudeGame.ResizeWindow`, as
-`CashShopStage` already does). Mature the `StatusBar` HUD (HP/MP/EXP gauges, level,
-job, quickslots, menu buttons) to the real v95 layout/assets, and reflow every HUD
-panel to the active resolution.
+**Scope.** `GameStage.OnEnter` enlarges the window from the 800×600 login canvas
+to the in-game resolution (1024×768) and restores the login size in `OnExit`
+(the same `Game.ResizeWindow` pattern `CashShopStage` uses; the previous size is
+captured at enter time). `GameCamera`'s view dimensions are synced to the live
+backbuffer each frame so the world→screen transform stays correct across the
+resize and the cash-shop round-trip. A new `GamePanel.Relayout(viewW, viewH)`
+hook re-anchors the HUD: `StatusBar` is now bottom-anchored and horizontally
+centred with a full-width EXP gauge (every anchor reduces to the original 800×600
+value at login size, so there is no regression there), and `ChatBar`,
+`BuffList`, and `StatusMessenger` re-anchor to their screen edges. The
+`QuitConfirmOverlay` dim layer now covers the whole window and recentres.
 
-**Exit criteria.** Entering a map enlarges the view and the HUD renders correctly
-at the new resolution; logging out restores the login size. **Key files:**
-`MapleClaudeGame.ResizeWindow`, `Stages/GameStage.cs`, `UI/Game/StatusBar.cs`.
+**Exit criteria.** Entering a map enlarges the view and the bottom HUD renders
+correctly at 1024×768; returning to login restores 800×600. **Key files:**
+`Stages/GameStage.cs`, `UI/Game/{GamePanel,StatusBar,ChatBar,BuffList,StatusMessenger}.cs`,
+`UI/QuitConfirmOverlay.cs`.
+
+**Deferred:** toggle windows (inventory, skills, stats, quest log, key config,
+options, world map, user list) keep their authored positions — they remain fully
+on-screen at the larger resolution; per-panel re-centring is a follow-up. The
+v95 `StatusBar3.img` artwork is centred rather than stretched/tiled to the full
+width (a later artwork pass).
 
 ## Phase 18 — Login polish
 

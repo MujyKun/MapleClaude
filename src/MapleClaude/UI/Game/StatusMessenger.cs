@@ -78,6 +78,14 @@ public sealed class StatusMessenger : GamePanel
     public void ShowQuest(string name)    => Show($"[Quest] {name}",          MsgColor.Cyan);
     public void ShowBuff(string name)     => Show($"[Buff] {name}",           MsgColor.Purple);
 
+    // ── Layout ──────────────────────────────────────────────────────────────
+
+    public override void Relayout(int viewWidth, int viewHeight) =>
+        // Bottom-left, above the chat bar, preserving the original 260px gap
+        // from the window bottom (340 on a 600-tall window). Messages stack
+        // upward from this anchor.
+        Position = new Vector2(10, viewHeight - 260);
+
     // ── Update ────────────────────────────────────────────────────────────────
 
     public override void Update(GameTime gt)

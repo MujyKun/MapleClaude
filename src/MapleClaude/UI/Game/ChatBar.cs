@@ -56,6 +56,15 @@ public sealed class ChatBar : GamePanel
         if (_lines.Count > 100) _lines.RemoveAt(0);
     }
 
+    public override void Relayout(int viewWidth, int viewHeight)
+    {
+        // Anchor to the bottom-left, preserving the original 240px gap from the
+        // window bottom (360 on a 600-tall window). The input field is baked
+        // relative to Position in the ctor, so move it to match.
+        Position = new Vector2(0, viewHeight - 240);
+        if (_input != null) _input.Position = Position + new Vector2(5, 102);
+    }
+
     public override void Update(GameTime gameTime) => _input?.Update(gameTime);
 
     public override void Draw(SpriteBatch sb, Texture2D white)
