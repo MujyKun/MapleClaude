@@ -199,6 +199,18 @@ public sealed class GameStage : Stage
         _charInfo = new CharInfo(_loader, _ui, font);
         _npcTalk = new NpcTalk(_loader, _ui, font);
         _shop = new Shop(_loader, _ui, font);
+        _shop.OnBuy = (slot, itemId, price, count) =>
+        {
+            if (Game.Session.IsConnected) Game.Session.Send(GameSender.ShopBuy((short)slot, itemId, count, price));
+        };
+        _shop.OnSell = (pos, itemId, count) =>
+        {
+            if (Game.Session.IsConnected) Game.Session.Send(GameSender.ShopSell(pos, itemId, count));
+        };
+        _shop.OnClosed = () =>
+        {
+            if (Game.Session.IsConnected) Game.Session.Send(GameSender.ShopClose());
+        };
         _notice = new Notice(_loader, _ui, font);
 
         _quitConfirm = new QuitConfirmOverlay(_loader, _ui, font, new Vector2(400, 300))
@@ -377,6 +389,19 @@ public sealed class GameStage : Stage
             else if (a.IsMoney)
                 _messenger?.ShowLoot($"+{a.Money:N0} mesos");
         };
+
+        // ── NPC shop ──────────────────────────────────────────────────────────
+        fh.OnShopOpen += args =>
+        {
+            if (_shop is null) return;
+            var buy = args.Items.Select((it, idx) => new Shop.ShopItem(
+                Game.Names.ItemName(it.ItemId) ?? $"Item {it.ItemId:D7}",
+                it.ItemId, it.Price, it.Quantity, idx)).ToList();
+            var inv = _item?.AllItems ?? (IReadOnlyList<ItemInventory.InvItem>)Array.Empty<ItemInventory.InvItem>();
+            var sell = inv.Select(iv => new Shop.ShopItem(iv.Name, iv.Id, 0, (short)iv.Quantity, iv.Slot)).ToList();
+            _shop.OpenShop(buy, sell);
+        };
+        fh.OnShopResult += args => _messenger?.Show(ShopResultText(args), StatusMessenger.MsgColor.White);
 
         // ── In-game migration (channel transfer / cash-shop return) ───────────
         // The server replies to TransferChannel with MigrateCommand(16); reconnect
@@ -928,6 +953,21 @@ public sealed class GameStage : Stage
             _currentBgm = bgm;
         }
     }
+
+    // ShopResultType (kinoko) → a player-facing line for the status messenger.
+    private static string ShopResultText(ShopResultArgs a) => a.ResultType switch
+    {
+        0  => "Purchase complete.",
+        1  => "That item is out of stock.",
+        2  => "You don't have enough mesos.",
+        4  => "Item sold.",
+        8  => "Recharge complete.",
+        10 => "You don't have enough mesos.",
+        16 => "You can't buy any more of this item.",
+        17 => "You can't trade this item.",
+        19 => a.Message ?? string.Empty,
+        _  => "The transaction could not be completed.",
+    };
 
     // DropPickUp warning subtypes (kinoko MessagePacket.DropPickUpMessageType):
     //   -3 CANNOT_ACQUIRE_ANY_ITEMS, -2 UNAVAILABLE_FOR_PICK_UP, -1 CANNOT_GET_ANYMORE_ITEMS.

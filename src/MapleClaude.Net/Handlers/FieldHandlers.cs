@@ -76,6 +76,10 @@ public sealed class FieldHandlers
     // ── NPC script ────────────────────────────────────────────────────────────
     public event Action<ScriptMessageArgs>?     OnScriptMessage;
 
+    // ── NPC shop ────────────────────────────────────────────────────────────────
+    public event Action<ShopOpenArgs>?          OnShopOpen;
+    public event Action<ShopResultArgs>?        OnShopResult;
+
     // ── Skills / buffs ─────────────────────────────────────────────────────────
     public event Action<List<SkillRecord>>?     OnSkillRecordResult;
     /// <summary>A buff (temporary-stat) set occurred — full per-stat decode is
@@ -128,6 +132,8 @@ public sealed class FieldHandlers
         OnPartyLoad           = null;
         OnFriendList          = null;
         OnScriptMessage       = null;
+        OnShopOpen            = null;
+        OnShopResult          = null;
         OnSkillRecordResult   = null;
         OnTemporaryStatSet    = null;
         OnTemporaryStatReset  = null;
@@ -161,6 +167,8 @@ public sealed class FieldHandlers
         router.Register(OutHeader.PartyResult,         (p, s) => HandlePartyResult(p));
         router.Register(OutHeader.FriendResult,        (p, s) => HandleFriendResult(p));
         router.Register(OutHeader.ScriptMessage,       (p, s) => HandleScriptMessage(p));
+        router.Register(OutHeader.OpenShopDlg,         (p, s) => HandleOpenShopDlg(p));
+        router.Register(OutHeader.ShopResult,          (p, s) => HandleShopResult(p));
         router.Register(OutHeader.FuncKeyMappedInit,   (p, s) => HandleFuncKeyMappedInit(p));
         router.Register(OutHeader.FootHoldInfo,        (p, s) => HandleFootHoldInfo(p));
         router.Register(OutHeader.ChangeSkillRecordResult, (p, s) => HandleChangeSkillRecord(p));
@@ -1059,6 +1067,69 @@ public sealed class FieldHandlers
         }
         OnFootHoldInfo?.Invoke(footholds);
     }
+
+    // ── NPC shop ────────────────────────────────────────────────────────────────
+    // OpenShopDlg: int npcId, short count, then per item: int itemId, int price,
+    //   byte discount, int tokenItemId, int tokenPrice, int period, int levelLimited,
+    //   then rechargeable → double unitPrice + short maxPerSlot; else short quantity +
+    //   short maxPerSlot. Mirrors kinoko ShopDialog.encode.
+    private void HandleOpenShopDlg(InPacket p)
+    {
+        var npcId = p.ReadInt();
+        var count = p.ReadShort();
+        var items = new List<ShopItemArg>(Math.Max(0, (int)count));
+        for (var i = 0; i < count; i++)
+        {
+            var itemId = p.ReadInt();
+            var price = p.ReadInt();
+            p.ReadByte();           // discount rate
+            p.ReadInt();            // token item id
+            p.ReadInt();            // token price
+            p.ReadInt();            // item period
+            p.ReadInt();            // level limited
+            short quantity;
+            if (IsRechargeable(itemId))
+            {
+                p.ReadDouble();     // unit price
+                quantity = p.ReadShort();   // max per slot
+            }
+            else
+            {
+                quantity = p.ReadShort();
+                p.ReadShort();      // max per slot
+            }
+            items.Add(new ShopItemArg { ItemId = itemId, Price = price, Quantity = quantity });
+        }
+        OnShopOpen?.Invoke(new ShopOpenArgs { NpcId = npcId, Items = items });
+    }
+
+    // Throwing stars (207xxxx) and bullets (233xxxx) recharge by unit price.
+    private static bool IsRechargeable(int itemId)
+    {
+        var prefix = itemId / 10000;
+        return prefix == 207 || prefix == 233;
+    }
+
+    // ShopResult: byte resultType; LimitLevel(14/15) → int level; ServerMsg(19) →
+    // bool hasMsg + string. Other types carry no body.
+    private void HandleShopResult(InPacket p)
+    {
+        var resultType = p.ReadByte();
+        var args = new ShopResultArgs { ResultType = resultType };
+        try
+        {
+            if (resultType is 14 or 15)
+            {
+                args.Level = p.ReadInt();
+            }
+            else if (resultType == 19 && p.ReadBool())
+            {
+                args.Message = p.ReadString();
+            }
+        }
+        catch (Exception) { /* trailing fields are best-effort */ }
+        OnShopResult?.Invoke(args);
+    }
 }
 
 // ── Argument types ────────────────────────────────────────────────────────────
@@ -1134,6 +1205,26 @@ public sealed class DropEnterArgs
 }
 
 public sealed class DropLeaveArgs { public int DropId; public byte LeaveType; }
+
+public sealed class ShopOpenArgs
+{
+    public int NpcId;
+    public List<ShopItemArg> Items = new();
+}
+
+public sealed class ShopItemArg
+{
+    public int   ItemId;
+    public int   Price;
+    public short Quantity;
+}
+
+public sealed class ShopResultArgs
+{
+    public byte    ResultType;
+    public int     Level;
+    public string? Message;
+}
 
 public sealed class LootMessageArgs
 {

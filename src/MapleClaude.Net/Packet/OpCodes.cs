@@ -62,6 +62,7 @@ public enum InHeader : short
     UserHP = 59,
     UserSelectNpc = 63,
     UserScriptMessageAnswer = 65,
+    UserShopRequest = 66,
     UserGatherItemRequest = 75,
     UserSortItemRequest = 76,
     UserChangeSlotPositionRequest = 77,
