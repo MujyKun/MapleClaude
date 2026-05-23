@@ -1868,11 +1868,14 @@ public sealed class GameStage : Stage
             {
                 continue;
             }
-            // Phase 4: client-chosen damage in a killable range. The v95 Kinoko
-            // server trusts the client damage value (no server-side recompute),
-            // so this is a placeholder until weapon + stat formulas land
-            // (Phase 6/7). A 1-hit swing → one damage int per mob.
-            var dmg = _attackRng.Next(30, 81);
+            // Client-chosen damage; the v95 Kinoko server trusts it (no
+            // server-side recompute). Scale it by the character's job/level/stats
+            // via MeleeDamage.Estimate so a stronger character hits harder, then
+            // roll within that window. A 1-hit swing → one damage int per mob.
+            var (dmgMin, dmgMax) = MeleeDamage.Estimate(
+                _charStats.JobId, Math.Max(1, _charStats.Level),
+                _charStats.Str, _charStats.Dex, _charStats.Int, _charStats.Luk);
+            var dmg = _attackRng.Next(dmgMin, dmgMax + 1);
             targets.Add(new MeleeTarget
             {
                 MobId = mob.MobId,
