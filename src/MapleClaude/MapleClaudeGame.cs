@@ -380,11 +380,9 @@ public sealed class MapleClaudeGame : Game
         Session.DrainInbound();
 
         var keyboard = Keyboard.GetState();
-        if (keyboard.IsKeyDown(Keys.Escape))
-        {
-            _logger.LogInformation("ESC pressed — exiting");
-            Exit();
-        }
+        // ESC is routed to the active stage via OnKeyPress below (e.g. quit-confirm
+        // on the login/game screens, back-navigation on world/char select) — it must
+        // NOT hard-exit the process here.
 
         var mouse = Mouse.GetState();
         var leftDown = mouse.LeftButton == ButtonState.Pressed;

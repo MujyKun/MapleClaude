@@ -372,14 +372,16 @@ public sealed class WorldSelectStage : Stage
 
     public override void OnKeyPress(Microsoft.Xna.Framework.Input.Keys key)
     {
-        if (key != Microsoft.Xna.Framework.Input.Keys.Back)
+        // ESC and Backspace both go back one level (authentic: ESC → GotoTitle).
+        if (key != Microsoft.Xna.Framework.Input.Keys.Back
+            && key != Microsoft.Xna.Framework.Input.Keys.Escape)
         {
             return;
         }
         if (_subScreen == SubScreen.ChannelGrid)
         {
             _subScreen = SubScreen.WorldList;
-            _logger.LogInformation("Backspace — leaving channel grid, back to world list");
+            _logger.LogInformation("Back — leaving channel grid, back to world list");
             return;
         }
         GoBackToLogin();

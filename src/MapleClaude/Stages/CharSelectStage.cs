@@ -419,6 +419,7 @@ public sealed class CharSelectStage : Stage
         switch (key)
         {
             case Keys.Back:
+            case Keys.Escape:   // both go back to world select (authentic ESC → GotoTitle/back)
                 GoBack();
                 break;
             case Keys.Enter:
