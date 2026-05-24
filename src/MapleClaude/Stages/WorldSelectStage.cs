@@ -34,11 +34,17 @@ public sealed class WorldSelectStage : Stage
     // ---- Authentic v95 layout constants (world select / channel select) ----
     private const int WorldGridCols = 6;                       // 96·(i%6), 26·(i/6)
     private static readonly Vector2 WorldGridStep = new(96, 26);
-    private static readonly Vector2 WorldFlagOffset = new(78, 6);
-    // World-button 0 in login-MAP coordinates: CUIWorldSelect dialog CreateDlg(-249,-862)
-    // + world-info layer RelMove(-10,-10). The signboard map object sits at (31,-808) in
-    // the same space, so the buttons land on the board automatically via the camera.
-    private static readonly Vector2 WorldGridOriginMap = new(-259, -872);
+    // World-state flag offset from a world button. The flag draws on the world-info
+    // layer (itself at dialog + RelMove(-10,-10)) at (+78,+6) per slot, i.e. (+68,-4)
+    // relative to the button. Per CUIWorldSelect::DrawWorldItems (IDA-verified).
+    private static readonly Vector2 WorldFlagOffset = new(68, -4);
+    // World-button 0 in login-MAP coordinates. The buttons are direct children of the
+    // CUIWorldSelect dialog (CreateDlg(-249,-862), bScreenCoord=0): CCtrlWnd::CreateCtrl
+    // places each at (96·col, 26·row) relative to the dialog's own layer, so button 0 is
+    // the dialog's top-left. (The RelMove(-10,-10) in OnCreate offsets the separate
+    // world-state-icon layer, NOT the buttons.) The signboard sits at map (31,-808) in
+    // the same space, so the buttons land on the board via the camera.
+    private static readonly Vector2 WorldGridOriginMap = new(-249, -862);
     private const int ChannelGridCols = 5;                     // 66·(i%5)+23, 29·(i/5)+93
     private static readonly Vector2 ChannelGridBase = new(23, 93);
     private static readonly Vector2 ChannelGridStep = new(66, 29);
