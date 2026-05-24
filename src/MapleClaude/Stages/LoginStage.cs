@@ -244,7 +244,9 @@ public sealed class LoginStage : Stage
         Game.LoginHandlers.OnCheckPasswordResult -= OnCheckPasswordResult;
         Game.Session.HandshakeReceived -= OnHandshake;
         Game.Session.Disconnected -= OnDisconnected;
-        Game.AudioPlayer.Stop();
+        // Do NOT stop the BGM here: world/char-select share this map's BGM
+        // (BgmUI/Title) and must continue seamlessly. The game stage switches to
+        // the field BGM on entry; AudioPlayer.Dispose stops it on shutdown.
         _loader?.Dispose();
         _loader = null;
         base.OnExit();

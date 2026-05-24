@@ -20,6 +20,7 @@ public sealed class WzAudioPlayer : IDisposable
     private readonly Dictionary<WzSound, (Song Song, string Path)> _cache = new();
     private readonly Dictionary<WzSound, SoundEffect?> _effects = new();
     private Song? _current;
+    private WzSound? _currentSound;
     private bool _disposed;
     private float _bgmVolume = 0.6f;
     private float _sfxVolume = 1.0f;
@@ -51,14 +52,30 @@ public sealed class WzAudioPlayer : IDisposable
     }
 
     /// <summary>
-    /// Starts playing the given sound on loop (BGM mode). Stops any currently
-    /// playing track. Returns <c>false</c> if the sound couldn't be prepared.
+    /// Starts playing the given sound on loop (BGM mode). If the same sound is
+    /// already looping, this is a no-op so the track plays seamlessly across
+    /// scene transitions that share a BGM (e.g. login → world → char select on
+    /// the one login map). Switching to a different sound replaces the track.
+    /// Returns <c>false</c> if the sound couldn't be prepared.
     /// </summary>
     public bool PlayLoop(WzSound? sound)
     {
         if (_disposed || sound is null)
         {
             return false;
+        }
+
+        // Idempotent: don't restart a track that's already the current loop.
+        if (ReferenceEquals(sound, _currentSound) && _current != null)
+        {
+            try
+            {
+                if (MediaPlayer.State is MediaState.Playing or MediaState.Paused)
+                {
+                    return true;
+                }
+            }
+            catch { /* no audio device / headless */ }
         }
 
         try
@@ -72,6 +89,7 @@ public sealed class WzAudioPlayer : IDisposable
                 _cache[sound] = entry;
             }
             _current = entry.Song;
+            _currentSound = sound;
             MediaPlayer.IsRepeating = true;
             MediaPlayer.Volume = _bgmVolume;
             MediaPlayer.Play(_current);
@@ -155,6 +173,7 @@ public sealed class WzAudioPlayer : IDisposable
                 // Ignore: MediaPlayer can throw when running headless or with no audio device.
             }
             _current = null;
+            _currentSound = null;
         }
     }
 
