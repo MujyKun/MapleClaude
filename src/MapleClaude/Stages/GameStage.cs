@@ -246,6 +246,12 @@ public sealed class GameStage : Stage
         _equip = new EquipInventory(_loader, _ui, font, iconLoader);
         _item = new ItemInventory(_loader, _ui, font, iconLoader);
         _item.OnItemActivate = OnInventoryItemActivate;
+        // Drag an item to another slot in the same tab → rearrange (server-authoritative).
+        _item.OnMoveItem = (tab, from, to) =>
+        {
+            if (Game.Session.IsConnected)
+                Game.Session.Send(GameSender.ChangeSlotPosition(TabToInvType(tab), (short)from, (short)to, 1));
+        };
         // Double-click a worn slot in the Equip window → unequip to the first free Equip-tab slot.
         _equip.OnUnequip = bodyPart =>
         {
@@ -1134,6 +1140,17 @@ public sealed class GameStage : Stage
             _   => (itemId / 1_000_000 == 1 && cat is >= 130 and <= 170) ? 11 : 0, // Weapon
         };
     }
+
+    // ItemInventory tab index → wire InventoryType (inverse of InvTypeToTab).
+    private static InventoryType TabToInvType(int tab) => tab switch
+    {
+        0 => InventoryType.Equip,
+        1 => InventoryType.Consume,
+        2 => InventoryType.Install,
+        3 => InventoryType.Etc,
+        4 => InventoryType.Cash,
+        _ => InventoryType.Equip,
+    };
 
     // 5 item tabs map to ItemInventory tab indices; Equipped(0) goes to the
     // equip panel, not the item grid.

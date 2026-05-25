@@ -107,6 +107,14 @@ public sealed class ItemInventory : GamePanel
     private int _prevWheel;
     private int _viewW = 800, _viewH = 600;
 
+    // ── Item tooltip + ghost drag ────────────────────────────────────────────────
+    private readonly ItemTooltip? _tooltip;
+    private bool _dragActive;            // an item icon is "picked up" onto the cursor
+    private InvItem? _dragItem;
+    private int _dragFromSlot = -1;
+    private int _dragFromTab;
+    private int _mouseX, _mouseY;
+
     public ItemInventory(WzTextureLoader loader, WzPackage? ui, BuiltInFont? font, ItemIconLoader? icons = null)
     {
         _loader = loader;
@@ -154,6 +162,8 @@ public sealed class ItemInventory : GamePanel
         // frame (Basic.img/BtClose3), exactly like CUIEquip. Anchor it top-right.
         if (ui?.GetItem("Basic.img/BtClose3") is WzProperty closeRoot)
             _btClose = new Button(_loader, closeRoot) { OnClick = () => IsVisible = false };
+
+        if (font != null && icons != null) _tooltip = new ItemTooltip(font, icons);
 
         LayoutButtons();
     }
@@ -235,6 +245,9 @@ public sealed class ItemInventory : GamePanel
     /// <summary>Raised on a double-click of an occupied slot: (tab, slot, itemId).</summary>
     public Action<int, int, int>? OnItemActivate { get; set; }
 
+    /// <summary>Raised when an item is dragged to a different slot in the same tab: (tab, from, to).</summary>
+    public Action<int, int, int>? OnMoveItem { get; set; }
+
     // ── Layout ───────────────────────────────────────────────────────────────────
 
     private int PanelW => _fullMode ? (_bgFull[0]?.Width ?? 594) : (_bgSmall[0]?.Width ?? 172);
@@ -306,6 +319,7 @@ public sealed class ItemInventory : GamePanel
 
         var m  = Mouse.GetState();
         var mp = new Vector2(m.X, m.Y);
+        _mouseX = m.X; _mouseY = m.Y;
 
         if (_dragging)
         {
@@ -323,6 +337,17 @@ public sealed class ItemInventory : GamePanel
 
         var down = m.LeftButton == ButtonState.Pressed;
         foreach (var b in VisibleButtons()) b.Update(m.X, m.Y, down);
+
+        // Finalize a picked-up item on mouse-up: drop onto the slot under the cursor (same tab).
+        if (_dragActive && !down)
+        {
+            var (_, toPos) = HitTest(m.X, m.Y);
+            if (toPos > 0 && toPos != _dragFromSlot)
+                OnMoveItem?.Invoke(_dragFromTab, _dragFromSlot, toPos);
+            _dragActive = false;
+            _dragItem = null;
+            _dragFromSlot = -1;
+        }
 
         (_hoverItem, _hoverPos) = HitTest(m.X, m.Y);
     }
@@ -383,6 +408,8 @@ public sealed class ItemInventory : GamePanel
         foreach (var (pos, it) in _tabs[_activeTab])
         {
             if (!CellForPosition(pos, out var cell)) continue;
+            // The picked-up item is drawn on the cursor, not in its home slot.
+            if (_dragActive && _dragFromTab == _activeTab && pos == _dragFromSlot) continue;
             DrawItemIcon(sb, white, it, cell);
             if (it.Grade is > 0 and < 6 && _quality[it.Grade] != null)
                 DrawAt(sb, _quality[it.Grade], cell + new Vector2(1, 1));
@@ -418,10 +445,23 @@ public sealed class ItemInventory : GamePanel
                 new Color(40, 40, 40));
         }
 
-        if (_hoverItem != null && _font != null)
+        // Ghost: the picked-up item's icon follows the cursor (so it reads as "held").
+        if (_dragActive && _dragItem != null)
         {
-            var m = Mouse.GetState();
-            DrawTooltip(sb, white, _hoverItem, m.X, m.Y);
+            var icon = ResolveIcon(_dragItem);
+            if (icon != null)
+                icon.Draw(sb, new Vector2(_mouseX - icon.Width / 2f, _mouseY - icon.Height / 2f) + icon.Origin,
+                    Microsoft.Xna.Framework.Graphics.SpriteEffects.None, new Color(255, 255, 255, 185));
+            else
+                sb.Draw(white, new Rectangle(_mouseX - 14, _mouseY - 14, 28, 28), new Color(80, 90, 120, 170));
+        }
+        else if (_hoverItem != null)
+        {
+            if (_tooltip != null)
+                _tooltip.Draw(sb, white, _hoverItem.Id, _hoverItem.Name, _hoverItem.Grade,
+                    _hoverItem.Quantity, _mouseX, _mouseY, _viewW, _viewH);
+            else if (_font != null)
+                DrawTooltip(sb, white, _hoverItem, _mouseX, _mouseY);
         }
     }
 
@@ -502,8 +542,9 @@ public sealed class ItemInventory : GamePanel
             for (var i = 0; i < 5; i++)
                 if (TabRect(i).Contains(x, y)) { _activeTab = i; return true; }
 
-            // Slot double-click → activate.
-            var (hit, _) = HitTest(x, y);
+            // Slot click: a double-click activates (equip/use); a single click picks the item up
+            // onto the cursor (ghost) so it can be dragged to another slot (dropped in Update).
+            var (hit, hitPos) = HitTest(x, y);
             if (hit != null)
             {
                 var now = Environment.TickCount64 / 1000.0;
@@ -511,8 +552,17 @@ public sealed class ItemInventory : GamePanel
                 {
                     OnItemActivate?.Invoke(hit.Tab, hit.Slot, hit.Id);
                     _lastClickItem = null;
+                    _dragActive = false;
                 }
-                else { _lastClickItem = hit; _lastClickTime = now; }
+                else
+                {
+                    _lastClickItem = hit;
+                    _lastClickTime = now;
+                    _dragActive = true;
+                    _dragItem = hit;
+                    _dragFromSlot = hitPos;
+                    _dragFromTab = _activeTab;
+                }
                 return true;
             }
 

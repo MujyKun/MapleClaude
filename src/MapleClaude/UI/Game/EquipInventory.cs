@@ -71,6 +71,8 @@ public sealed class EquipInventory : GamePanel
     private readonly List<Button> _allButtons = new();
     private readonly ItemIconLoader _icons;
     private readonly BuiltInFont? _font;
+    private readonly ItemTooltip? _tooltip;
+    private int _viewW = 800, _viewH = 600;
 
     // ── State ────────────────────────────────────────────────────────────────
     private int  _tooltipPart = -1;
@@ -87,6 +89,7 @@ public sealed class EquipInventory : GamePanel
     {
         _font  = font;
         _icons = icons;
+        if (font != null) _tooltip = new ItemTooltip(font, icons);
         IsVisible = false;
         Position  = new Vector2(560, 60);
 
@@ -226,10 +229,20 @@ public sealed class EquipInventory : GamePanel
 
         foreach (var b in _allButtons) b.Draw(sb);
 
-        if (_tooltipPart >= 0 && _font != null && _equipped.TryGetValue(_tooltipPart, out var hov))
+        if (_tooltipPart >= 0 && _equipped.TryGetValue(_tooltipPart, out var hov))
         {
-            DrawTooltip(sb, white, hov.Name);
+            var m = Mouse.GetState();
+            if (_tooltip != null)
+                _tooltip.Draw(sb, white, hov.ItemId, hov.Name, 0, 1, m.X, m.Y, _viewW, _viewH);
+            else if (_font != null)
+                DrawTooltip(sb, white, hov.Name);
         }
+    }
+
+    public override void Relayout(int viewWidth, int viewHeight)
+    {
+        _viewW = viewWidth;
+        _viewH = viewHeight;
     }
 
     private void DrawTooltip(SpriteBatch sb, Texture2D white, string text)
