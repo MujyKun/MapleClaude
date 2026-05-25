@@ -64,6 +64,13 @@ public sealed class MapleClaudeGame : Game
     private bool _prevMiddleDown;
     private KeyboardState _prevKeyboard;
 
+    // Key auto-repeat: holding a key keeps re-firing OnKeyPress (after an initial delay) so dialogs,
+    // panels and other discrete actions can be "spammed" by holding the key, like the OS keyboard repeat.
+    private const float KeyRepeatDelay = 0.40f;   // seconds before a held key starts repeating
+    private const float KeyRepeatRate  = 0.10f;   // seconds between repeats once started
+    private readonly Dictionary<Keys, float> _keyRepeat = new();
+    private readonly List<Keys> _keyReleaseScratch = new();
+
     // Drag-mode picker state (only used when DebugRegistry.DragMode is on).
     private DebugItem? _dragTarget;
     private Vector2 _dragOffset;
@@ -77,11 +84,27 @@ public sealed class MapleClaudeGame : Game
     // drive the Han↔Yeong toggle from raw key messages. See InitializeImeSupport.
     private ImeWindowHook? _imeHook;
 
+    // System-wide low-level keyboard hook. The game window is an *unmanaged* HWND, so the WndProc
+    // subclass only reliably sees system keys (WM_SYSKEYDOWN — that's why Right-Alt works there) and
+    // misses Right-Ctrl's WM_KEYDOWN. WH_KEYBOARD_LL runs ahead of all window message handling and
+    // reports the L/R modifiers as distinct VKs (VK_RCONTROL/SHIFT/MENU), so it's the reliable source
+    // for right-modifier state feeding KeyConfig (e.g. attack bound to Ctrl firing from Right-Ctrl).
+    private IntPtr _llKbHook;
+    private LowLevelKeyboardProc? _llKbProc;   // held in a field so the GC can't collect the callback
+
     // The IME/Hangul key (한/영) acts as a jump in gameplay (no text field focused). The hook sets this
     // one-shot request because the key is a tap MonoGame doesn't surface as a held key for polling.
     private bool _imeJumpRequested;
     internal void RequestImeJump() => _imeJumpRequested = true;
     public bool ConsumeImeJump() { var r = _imeJumpRequested; _imeJumpRequested = false; return r; }
+
+    // Right-Ctrl acts as a Left-Ctrl press (so an attack bound to Ctrl fires from either). MonoGame's
+    // polled keyboard never surfaces Right-Ctrl, so — exactly like Right-Alt→jump above — the window
+    // hook / low-level keyboard hook sets this one-shot on each Right-Ctrl key-down (incl. auto-repeat)
+    // and Update replays it as OnKeyPress(LeftControl), routing through the real Ctrl binding.
+    private bool _rightCtrlRequested;
+    internal void RequestRightCtrl() => _rightCtrlRequested = true;
+    private bool ConsumeRightCtrl() { var r = _rightCtrlRequested; _rightCtrlRequested = false; return r; }
 
     /// <summary>The cursor overlay. Public so stages can call <see cref="MapleCursor.SetHover"/>.</summary>
     public MapleCursor? Cursor => _cursor;
@@ -336,6 +359,69 @@ public sealed class MapleClaudeGame : Game
 
     private const int ImeCmodeNative = 0x0001;        // Korean Hangul / Japanese Hiragana / etc.
     private const int GcsCompStr = 0x0008;            // the in-progress (un-committed) composition string
+
+    // ── Low-level keyboard hook (right-modifier tracking) ──────────────────────────────────────────
+    private const int WhKeyboardLl = 13;
+    private delegate IntPtr LowLevelKeyboardProc(int nCode, IntPtr wParam, IntPtr lParam);
+
+    [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
+    private static extern IntPtr SetWindowsHookEx(int idHook, LowLevelKeyboardProc lpfn, IntPtr hMod, uint dwThreadId);
+
+    [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
+    [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
+    private static extern bool UnhookWindowsHookEx(IntPtr hhk);
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern IntPtr CallNextHookEx(IntPtr hhk, int nCode, IntPtr wParam, IntPtr lParam);
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+    private static extern IntPtr GetModuleHandle(string? lpModuleName);
+
+    /// <summary>Install the global low-level keyboard hook so Right-Ctrl/Shift/Alt physical state is
+    /// tracked even though the unmanaged game window's WndProc never surfaces their WM_KEYDOWN.</summary>
+    private void InstallLowLevelKeyboardHook()
+    {
+        try
+        {
+            _llKbProc = LowLevelKeyboardCallback;
+            _llKbHook = SetWindowsHookEx(WhKeyboardLl, _llKbProc, GetModuleHandle(null), 0);
+            if (_llKbHook == IntPtr.Zero)
+                _logger.LogWarning("Low-level keyboard hook failed to install (err {Err}) — Right-Ctrl/Shift may not register",
+                    System.Runtime.InteropServices.Marshal.GetLastWin32Error());
+            else
+                _logger.LogInformation("Low-level keyboard hook installed (right-modifier tracking)");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Could not install low-level keyboard hook");
+        }
+    }
+
+    private IntPtr LowLevelKeyboardCallback(int nCode, IntPtr wParam, IntPtr lParam)
+    {
+        if (nCode >= 0)
+        {
+            var msg = wParam.ToInt32();
+            var isDown = msg == WmKeyDown || msg == WmSysKeyDown;
+            var isUp = msg == WmKeyUp || msg == WmSysKeyUp;
+            if (isDown || isUp)
+            {
+                // KBDLLHOOKSTRUCT.vkCode is the first DWORD; the LL hook reports the *specific* L/R VK.
+                var vk = System.Runtime.InteropServices.Marshal.ReadInt32(lParam);
+                switch (vk)
+                {
+                    case VkRControl:
+                    case VkHanja:   // Right Ctrl on a Korean keyboard arrives as the Hanja key
+                        UI.Game.KeyConfig.RCtrlDown = isDown;
+                        if (isDown) _rightCtrlRequested = true;   // replay as a Left-Ctrl press in Update
+                        break;
+                    case VkRShift:   UI.Game.KeyConfig.RShiftDown = isDown; break;
+                    case VkRMenu:    UI.Game.KeyConfig.RAltDown = isDown; break;
+                }
+            }
+        }
+        return CallNextHookEx(_llKbHook, nCode, wParam, lParam);
+    }
     private const int GcsResultStr = 0x0800;          // the committed result string
 
     /// <summary>Reads a UTF-16 composition string (e.g. <c>GCS_COMPSTR</c>) from an input context.</summary>
@@ -414,14 +500,22 @@ public sealed class MapleClaudeGame : Game
     // Window-message + virtual-key constants for the IME WndProc hook.
     private const int WmSetFocus = 0x0007;
     private const int WmKeyDown = 0x0100;
+    private const int WmKeyUp = 0x0101;
     private const int WmSysKeyDown = 0x0104;
+    private const int WmSysKeyUp = 0x0105;
     private const int WmInputLangChange = 0x0051;
     private const int WmImeStartComposition = 0x010D;
     private const int WmImeComposition = 0x010F;
     private const int WmImeEndComposition = 0x010E;
-    private const int VkHangul = 0x15;   // Korean Han/Yeong key (== VK_KANA)
+    private const int VkHangul = 0x15;   // Korean Han/Yeong key (== VK_KANA) — Right Alt on a KR keyboard
+    private const int VkHanja = 0x19;    // Korean Hanja key — Right Ctrl on a KR keyboard
+    private const int VkShift = 0x10;    // generic Shift (L/R distinguished by scancode)
+    private const int VkControl = 0x11;  // generic Ctrl (Right Ctrl arrives here + extended bit)
     private const int VkMenu = 0x12;     // generic Alt (Right Alt arrives here + extended bit)
+    private const int VkRShift = 0xA1;   // Right Shift (direct)
+    private const int VkRControl = 0xA3; // Right Ctrl (direct)
     private const int VkRMenu = 0xA5;    // Right Alt (some configs deliver this directly)
+    private const int ScanRShift = 0x36; // Right Shift's scancode (lParam bits 16-23)
 
     /// <summary>
     /// Make the game window participate in the Windows IME so Korean (and other) input
@@ -455,6 +549,9 @@ public sealed class MapleClaudeGame : Game
             _imeHook = new ImeWindowHook(this);
             _imeHook.AssignHandle(hwnd);
             _logger.LogInformation("IME: WndProc hook attached to window 0x{Hwnd:X}", hwnd.ToInt64());
+
+            // The unmanaged HWND's WndProc misses Right-Ctrl's WM_KEYDOWN, so add a system-level hook.
+            InstallLowLevelKeyboardHook();
         }
         catch (Exception ex)
         {
@@ -479,6 +576,11 @@ public sealed class MapleClaudeGame : Game
             switch (m.Msg)
             {
                 case WmSetFocus:
+                    // Regaining focus: drop any stale held-modifier state (a key released while we were
+                    // unfocused never delivered its WM_KEYUP here), so it can't trigger a phantom attack.
+                    UI.Game.KeyConfig.RCtrlDown = UI.Game.KeyConfig.RShiftDown = UI.Game.KeyConfig.RAltDown = false;
+                    _owner.EnsureImeContext(m.HWnd);
+                    break;
                 case WmInputLangChange:
                     _owner.EnsureImeContext(m.HWnd);
                     break;
@@ -512,14 +614,34 @@ public sealed class MapleClaudeGame : Game
                 }
                 case WmKeyDown:
                 case WmSysKeyDown:
+                case WmKeyUp:
+                case WmSysKeyUp:
                 {
                     var vk = m.WParam.ToInt32();
-                    // Right Alt reports as generic VK_MENU with the extended-key bit
-                    // (lParam bit 24) set; left Alt does not. Also accept the dedicated
-                    // Korean key (VK_HANGUL) and a direct VK_RMENU if a config sends it.
-                    var extended = (m.LParam.ToInt64() & 0x0100_0000) != 0;
+                    var lp = m.LParam.ToInt64();
+                    // Right Ctrl/Alt report as the generic VK with the extended-key bit (lParam bit 24)
+                    // set; the left ones don't. Right Shift keeps VK_SHIFT but carries scancode 0x36.
+                    var extended = (lp & 0x0100_0000) != 0;
+                    var scan = (int)((lp >> 16) & 0xFF);
+                    var isDown = m.Msg == WmKeyDown || m.Msg == WmSysKeyDown;
+
+                    // Track the physical RIGHT modifiers. MonoGame's polled keyboard never reports them
+                    // and GetAsyncKeyState proved unreliable on some machines, but this window hook sees
+                    // every key (it's why Right-Alt jump already works here). KeyConfig.AnyHeld consults
+                    // these so an action bound to L-Ctrl/Shift/Alt also fires from the right twin.
+                    if (vk == VkRControl || vk == VkHanja || (vk == VkControl && extended))
+                    {
+                        UI.Game.KeyConfig.RCtrlDown = isDown;
+                        if (isDown) _owner._rightCtrlRequested = true;   // replay as a Left-Ctrl press in Update
+                    }
+                    else if (vk == VkRShift || (vk == VkShift && scan == ScanRShift)) UI.Game.KeyConfig.RShiftDown = isDown;
+                    else if (vk == VkRMenu || (vk == VkMenu && extended)) UI.Game.KeyConfig.RAltDown = isDown;
+
+                    // Right Alt / IME toggle is a key-DOWN action only.
+                    // Right Alt reports as generic VK_MENU + extended; also accept the dedicated Korean
+                    // key (VK_HANGUL) and a direct VK_RMENU if a config sends it.
                     var imeKey = vk == VkHangul || vk == VkRMenu || (vk == VkMenu && extended);
-                    if (imeKey)
+                    if (isDown && imeKey)
                     {
                         // Toggle Han↔Yeong only while a text field is focused; otherwise the IME/Right-Alt
                         // key acts as the in-game jump (the hook is the only reliable place that sees it).
@@ -568,6 +690,7 @@ public sealed class MapleClaudeGame : Game
     protected override void UnloadContent()
     {
         _imeHook?.ReleaseHandle();
+        if (_llKbHook != IntPtr.Zero) { UnhookWindowsHookEx(_llKbHook); _llKbHook = IntPtr.Zero; }
         Session.Dispose();
         AudioPlayer.Dispose();
         _cursorLoader?.Dispose();
@@ -618,8 +741,10 @@ public sealed class MapleClaudeGame : Game
             DispatchMouse(mouse.MiddleButton == ButtonState.Pressed, ref _prevMiddleDown, mouse.X, mouse.Y, MouseButton.Middle);
         }
 
-        // Keyboard edge detection → OnKeyPress (for keys that aren't covered by TextInput).
+        // Keyboard edge detection + auto-repeat → OnKeyPress (for keys not covered by TextInput).
         var pressedKeys = keyboard.GetPressedKeys();
+        var keyDt = (float)gameTime.ElapsedGameTime.TotalSeconds;
+        var typing = UI.TextField.Active != null;   // don't repeat-fire actions while typing in a field
         foreach (var k in pressedKeys)
         {
             if (!_prevKeyboard.IsKeyDown(k))
@@ -628,9 +753,30 @@ public sealed class MapleClaudeGame : Game
                 // window-message level in ImeWindowHook.WndProc, which is reliable for Alt/IME
                 // keys that MonoGame's polled keyboard state doesn't surface consistently.
                 StageDirector.OnKeyPress(k);
+                _keyRepeat[k] = KeyRepeatDelay;
+            }
+            else if (!typing && _keyRepeat.TryGetValue(k, out var t))
+            {
+                // Held: fire again once the initial delay, then each repeat interval, elapses.
+                t -= keyDt;
+                while (t <= 0f) { StageDirector.OnKeyPress(k); t += KeyRepeatRate; }
+                _keyRepeat[k] = t;
             }
         }
+        // Forget repeat state for keys that are no longer held.
+        if (_keyRepeat.Count > 0)
+        {
+            _keyReleaseScratch.Clear();
+            foreach (var kv in _keyRepeat)
+                if (!keyboard.IsKeyDown(kv.Key)) _keyReleaseScratch.Add(kv.Key);
+            foreach (var k in _keyReleaseScratch) _keyRepeat.Remove(k);
+        }
         _prevKeyboard = keyboard;
+
+        // Right-Ctrl → replay as a Left-Ctrl press so it triggers the Ctrl-bound action (e.g. attack),
+        // mirroring how Right-Alt is replayed as jump. Fires per key-down (incl. OS auto-repeat) so it
+        // can be held; cooldown-gated actions like the melee swing pace themselves.
+        if (ConsumeRightCtrl()) StageDirector.OnKeyPress(Keys.LeftControl);
 
         StageDirector.Update(gameTime);
         _cursor?.Update(gameTime);

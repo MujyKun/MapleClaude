@@ -42,6 +42,7 @@ public sealed class PlayerController
     private readonly List<MoveElement> _pending = new();
     private Vector2 _lastSyncPos;
     private Vector2 _lastSyncVel;
+    private Stance _lastSyncStance = Stance.Stand1;
 
     // ── Input edge-detect ─────────────────────────────────────────────────────
     private bool _prevJump;
@@ -107,8 +108,11 @@ public sealed class PlayerController
             _velocity = new Vector2(MathF.Abs(vx) <= dec ? 0f : vx - MathF.Sign(vx) * dec, _velocity.Y);
         }
 
-        // Jump — edge-detect: only trigger on the frame the key is first pressed
-        var jumpEdge = input.JumpPressed && !_prevJump;
+        // Jump trigger: fire on the rising edge, but also whenever grounded while the key is held — so
+        // holding jump re-jumps on every landing (you jump, become airborne, land, jump again) instead of
+        // requiring a fresh tap each time. The `&& _grounded` gate below already limits this to one jump
+        // per ground contact (jumping immediately leaves the ground).
+        var jumpEdge = input.JumpPressed && (!_prevJump || _grounded);
         _prevJump = input.JumpPressed;
 
         var downJumped = false;
@@ -193,9 +197,12 @@ public sealed class PlayerController
             if (_animTimer >= 0.18f) { _animTimer -= 0.18f; Frame = (Frame + 1) % 4; }
         }
 
-        // Accumulate move-path
+        // Accumulate move-path — but only when the player is actually moving or changing state.
+        // While idle (grounded, velocity ~0, stance unchanged) we queue nothing, so the per-frame
+        // flush in GameStage sends nothing. The v95 client likewise stops emitting UserMove while
+        // standing still instead of spamming it ~60×/s.
         _flushTimer += dt;
-        if (_flushTimer >= FlushSeconds || _pending.Count >= MaxElements)
+        if ((_flushTimer >= FlushSeconds || _pending.Count >= MaxElements) && HasChangedSinceSync())
             AppendNormal();
     }
 
@@ -221,6 +228,13 @@ public sealed class PlayerController
         }
         _wasGrounded = _grounded;
         _prevJump    = false;
+        // Treat the spawn pose as the baseline so we don't emit a spurious idle UserMove on arrival;
+        // the drop-in fall (if airborne) is real movement and re-triggers sends naturally.
+        _pending.Clear();
+        _flushTimer     = 0f;
+        _lastSyncPos    = Position;
+        _lastSyncVel    = _velocity;
+        _lastSyncStance = Stance;
     }
 
     /// <summary>Grounded: move along the current foothold's slope by <paramref name="dx"/>, crossing
@@ -436,10 +450,18 @@ public sealed class PlayerController
             MoveAction = StanceMoveAction(Stance),
             Elapse     = elapsedMs,
         });
-        _flushTimer   = 0f;
-        _lastSyncPos  = Position;
-        _lastSyncVel  = _velocity;
+        _flushTimer     = 0f;
+        _lastSyncPos    = Position;
+        _lastSyncVel    = _velocity;
+        _lastSyncStance = Stance;
     }
+
+    // True when position, velocity, or stance has meaningfully changed since the last queued sample.
+    // Gates move-path accumulation so an idle, grounded player emits no UserMove traffic.
+    private bool HasChangedSinceSync()
+        => Stance != _lastSyncStance
+        || Vector2.DistanceSquared(Position, _lastSyncPos) > 0.25f
+        || Vector2.DistanceSquared(_velocity, _lastSyncVel) > 0.25f;
 
     /// <summary>
     /// Flush the accumulated move path into a wire blob.
@@ -447,11 +469,7 @@ public sealed class PlayerController
     /// </summary>
     public bool TryFlushMovePath(out byte[] blob)
     {
-        if (_pending.Count == 0)
-        {
-            // Ensure at least one NORMAL sample was queued
-            AppendNormal();
-        }
+        // Nothing queued → the player hasn't moved since the last send; don't emit an idle UserMove.
         if (_pending.Count == 0) { blob = Array.Empty<byte>(); return false; }
 
         blob = MovePathEncoder.Encode(

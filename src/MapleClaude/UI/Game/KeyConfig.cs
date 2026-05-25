@@ -213,18 +213,24 @@ public sealed class KeyConfig : GamePanel
         return false;
     }
 
+    // Physical RIGHT-modifier state, fed by the window hook (MapleClaudeGame.ImeWindowHook.WndProc) on
+    // WM_KEY{DOWN,UP}. MonoGame's Keyboard.GetState() never reports the right modifiers, and
+    // GetAsyncKeyState proved unreliable on some machines — the window-message path always sees them.
+    public static bool RCtrlDown, RShiftDown, RAltDown;
+
     // VK_RSHIFT=0xA1, VK_RCONTROL=0xA3, VK_RMENU=0xA5. GetAsyncKeyState's high bit = key currently
-    // physically down. Used because MonoGame's Keyboard.GetState() doesn't report the right modifiers.
+    // physically down. Kept as a fallback for the (unlikely) case the window hook hasn't attached.
     [System.Runtime.InteropServices.DllImport("user32.dll")]
     private static extern short GetAsyncKeyState(int vKey);
 
     /// <summary>True when the given RIGHT modifier is physically held (focus-agnostic; callers gate on
-    /// window focus). Returns false for any non-right-modifier key.</summary>
+    /// window focus). Prefers the hook-tracked state, falling back to GetAsyncKeyState. Returns false for
+    /// any non-right-modifier key.</summary>
     public static bool RightModDown(Keys k) => k switch
     {
-        Keys.RightControl => (GetAsyncKeyState(0xA3) & 0x8000) != 0,
-        Keys.RightShift   => (GetAsyncKeyState(0xA1) & 0x8000) != 0,
-        Keys.RightAlt     => (GetAsyncKeyState(0xA5) & 0x8000) != 0,
+        Keys.RightControl => RCtrlDown || (GetAsyncKeyState(0xA3) & 0x8000) != 0,
+        Keys.RightShift   => RShiftDown || (GetAsyncKeyState(0xA1) & 0x8000) != 0,
+        Keys.RightAlt     => RAltDown   || (GetAsyncKeyState(0xA5) & 0x8000) != 0,
         _ => false,
     };
 

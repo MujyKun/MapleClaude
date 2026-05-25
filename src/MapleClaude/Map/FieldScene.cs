@@ -24,6 +24,7 @@ public sealed class FieldScene
     private readonly WzTextureLoader _loader;
     private readonly Dictionary<int, Foothold> _footholds = new();
     private readonly Dictionary<int, Portal> _portals = new();
+    private AnimatedSprite? _portalPv;   // visible-portal (type 2) swirl: Map.wz/MapHelper.img/portal/game/pv
     private readonly List<LadderRope> _ladderRopes = new();
     private MapInfo _info = new();
     private Rectangle _bounds = new(-3000, -2000, 6000, 4000);
@@ -108,6 +109,8 @@ public sealed class FieldScene
         AssignZMass();
         ComputeBounds();
         LoadPortals(root);
+        // Visible portals (type 2) render the animated "pv" swirl from the shared MapHelper image.
+        _portalPv = _loader.LoadAnimation(_mapWz.GetItem("MapHelper.img/portal/game/pv"));
         LoadLadderRope(root);
         try
         {
@@ -354,6 +357,7 @@ public sealed class FieldScene
         {
             foreach (var o in layer) o.Sprite?.Update(dtMs);
         }
+        _portalPv?.Update(dtMs);
     }
 
     private static void UpdateBack(BackDraw b, double dtMs)
@@ -390,6 +394,12 @@ public sealed class FieldScene
         }
 
         foreach (var b in _fronts) DrawBackground(sb, b, center, screenWidth, screenHeight);
+
+        // Visible portals (type 2): the animated swirl, anchored by the pv canvas origin to the portal point.
+        if (_portalPv is not null)
+            foreach (var (_, portal) in _portals)
+                if (portal.Type == 2)
+                    _portalPv.Draw(sb, WorldToScreen(portal.X, portal.Y, center));
 
         // Debug foothold overlay (MAPLECLAUDE_DEBUG): floors green, walls red; blue channel encodes the WZ
         // layer (page) so it can be cross-checked against a WZ editor's per-layer views.
