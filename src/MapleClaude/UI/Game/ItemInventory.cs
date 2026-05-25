@@ -83,6 +83,7 @@ public sealed class ItemInventory : GamePanel
     private readonly Button? _btFull;
     private readonly Button? _btSmall;
     private readonly Button? _btCashshop;
+    private readonly Button? _btClose;
 
     private readonly WzTextureLoader _loader;
     private readonly ItemIconLoader? _icons;
@@ -149,6 +150,11 @@ public sealed class ItemInventory : GamePanel
         _btSmall    = MakeButton(item, "BtSmall", () => SetFullMode(false));
         _btCashshop = MakeButton(item, "BtCashshop");
 
+        // CUIItem has no own BtClose node — the close X is added by the shared CUIWnd
+        // frame (Basic.img/BtClose3), exactly like CUIEquip. Anchor it top-right.
+        if (ui?.GetItem("Basic.img/BtClose3") is WzProperty closeRoot)
+            _btClose = new Button(_loader, closeRoot) { OnClick = () => IsVisible = false };
+
         LayoutButtons();
     }
 
@@ -203,6 +209,17 @@ public sealed class ItemInventory : GamePanel
 
     public InvItem? ItemAt(int tab, int slot) =>
         (uint)tab < 5 && _tabs[tab].TryGetValue((short)slot, out var it) ? it : null;
+
+    /// <summary>Lowest 1-based slot in a tab not currently occupied (1..max), or -1 if full.
+    /// Used to auto-place an item unequipped back into the Equip tab.</summary>
+    public int FirstFreeSlot(int tab, int max = 96)
+    {
+        if ((uint)tab >= 5) return -1;
+        var t = _tabs[tab];
+        for (var s = 1; s <= max; s++)
+            if (!t.ContainsKey((short)s)) return s;
+        return -1;
+    }
 
     /// <summary>All inventory items (for the shop sell list).</summary>
     public IReadOnlyList<InvItem> AllItems => _tabs.SelectMany(t => t.Values).ToList();
@@ -260,10 +277,14 @@ public sealed class ItemInventory : GamePanel
 
         if (_btFull  != null) _btFull.Enabled  = !_fullMode;
         if (_btSmall != null) _btSmall.Enabled = _fullMode;
+
+        // Close X: top-right of the active background (small 172w / full 594w).
+        if (_btClose != null) _btClose.Position = Position + new Vector2(PanelW - 18, 6);
     }
 
     private IEnumerable<Button> VisibleButtons()
     {
+        if (_btClose != null) yield return _btClose;
         if (_btCoin != null) yield return _btCoin;
         // Single arrange button (gather/sort are its two states).
         var arrange = _showSort ? _btSort : _btGather;
