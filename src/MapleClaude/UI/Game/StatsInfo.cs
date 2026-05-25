@@ -1,5 +1,5 @@
+using MapleClaude.Domain;
 using MapleClaude.Render;
-using MapleClaude.UI;
 using MapleClaude.Wz;
 using Microsoft.Xna.Framework;
 using Microsoft.Xna.Framework.Graphics;
@@ -8,230 +8,294 @@ using Microsoft.Xna.Framework.Input;
 namespace MapleClaude.UI.Game;
 
 /// <summary>
-/// Character stats panel with ability-point distribution.
-/// Toggle with S key. + buttons active when AP > 0.
-/// Auto-assign (▶) button spends all AP into the primary stat.
+/// Character ability window — the original client's <c>CUIStat</c>, toggled with
+/// the S key. Rebuilt 1:1 from <c>UI/UIWindow2.img/Stat/main</c>: backgrounds and
+/// buttons are positioned by their WZ origin (the negative origins encode each
+/// child's in-window offset), and the stat values are drawn at the exact
+/// window-local coordinates the client uses (left-aligned at x=54).
 ///
-/// WZ: UIWindow.img/Stat/
-///   backgrnd, BtClose, BtDetail, BtAP, BtAutoAssign
+/// All <c>+</c> buttons send an ability-up request to the server and do NOT mutate
+/// stats locally — the authoritative value comes back via <c>StatChanged</c>.
 /// </summary>
 public sealed class StatsInfo : GamePanel
 {
-    // ── WZ ────────────────────────────────────────────────────────────────────
-    private readonly WzSprite? _background;
-    private readonly Button?   _btClose;
-    private readonly Button?   _btDetail;
-    private readonly List<Button> _allButtons = new();
+    private readonly WzTextureLoader _loader;
+    private readonly BuiltInFont? _font;
 
-    // Per-stat + buttons (drawn when AP > 0)
-    private readonly Button?[] _apBtns = new Button?[4]; // STR DEX INT LUK
+    // ── Backgrounds ───────────────────────────────────────────────────────────
+    private readonly WzSprite? _bg;
+    private readonly WzSprite? _bg2;
+    private readonly WzSprite? _bg3;
+    private readonly WzSprite? _cover0;
+    private readonly WzSprite? _cover1;
 
-    // ── Stats (set by GameStage / server packets) ────────────────────────────
-    public int Level { get; set; } = 1;
+    // ── Buttons ───────────────────────────────────────────────────────────────
+    // m_pBtApUp order from CUIStat::OnCreate: HP, MP, STR, DEX, INT, LUK.
+    private readonly Button?[] _apBtns = new Button?[6];
+    private readonly Button? _btDetailOpen;
+    private readonly Button? _btDetailClose;
+    private readonly Button? _btAuto;   // non-pirate auto-assign
+    private readonly Button? _btAuto1;  // pirate STR
+    private readonly Button? _btAuto2;  // pirate DEX
+
+    // ── Values (set by GameStage from CharStats / StatChanged) ─────────────────
+    public string Name { get; set; } = string.Empty;
     public string Job { get; set; } = "Beginner";
-    public int AP { get; set; } = 0;
-    public int SP { get; set; } = 0;
+    public int JobId { get; set; }
+    public string Guild { get; set; } = string.Empty;
+    public int Level { get; set; } = 1;
+    public int Exp { get; set; }
+    public int Fame { get; set; }
+    public int AP { get; set; }
+    public int SP { get; set; }
     public int Str { get; set; } = 4;
     public int Dex { get; set; } = 4;
     public int Int { get; set; } = 4;
     public int Luk { get; set; } = 4;
-    public int Hp  { get; set; } = 50;  public int MaxHp  { get; set; } = 50;
-    public int Mp  { get; set; } = 5;   public int MaxMp  { get; set; } = 5;
-    public int Atk { get; set; } = 10;
-    public int Def { get; set; } = 10;
-    public int Speed { get; set; } = 100;
-    public int Jump  { get; set; } = 100;
+    public int Hp { get; set; } = 50; public int MaxHp { get; set; } = 50;
+    public int Mp { get; set; } = 5;  public int MaxMp { get; set; } = 5;
 
-    // ── Callbacks (wired by GameStage) ───────────────────────────────────────
+    // Equip bonuses for the "%d (%d%+d)" breakdown (0 until equip data flows).
+    public int StrBonus { get; set; }
+    public int DexBonus { get; set; }
+    public int IntBonus { get; set; }
+    public int LukBonus { get; set; }
+
+    // ── Callbacks (wired by GameStage) ────────────────────────────────────────
+    public Action? OnHpUp { get; set; }
+    public Action? OnMpUp { get; set; }
     public Action? OnStrUp { get; set; }
     public Action? OnDexUp { get; set; }
     public Action? OnIntUp { get; set; }
     public Action? OnLukUp { get; set; }
+    /// <summary>Auto-assign: argument is the primary-stat flag to pour all AP into.</summary>
+    public Action<int>? OnAutoAssign { get; set; }
+    /// <summary>Raised when the detail button toggles; argument is the new open state.</summary>
+    public Action<bool>? OnDetailToggled { get; set; }
 
-    // ── Detail expand ────────────────────────────────────────────────────────
-    private bool _showDetail;
+    public bool DetailOpen { get; private set; }
 
-    private readonly BuiltInFont? _font;
+    // ── Layout (window-local pixel offsets from CUIStat::Draw) ─────────────────
+    private const int RowName = 32;
+    private const int RowJob = 50;
+    private const int RowLevel = 68;
+    private const int RowGuild = 86;
+    private const int RowHp = 104;
+    private const int RowMp = 122;
+    private const int RowExp = 140;
+    private const int RowFame = 158;
+    private const int RowAp = 200;     // AP value (right-aligned at x=85)
+    private const int RowStr = 227;
+    private const int RowDex = 245;
+    private const int RowInt = 263;
+    private const int RowLuk = 281;
+    private const int ColValue = 54;
+    private const int ApRightEdge = 85;
 
-    private const int PanelW = 172;
-    private const int PanelH = 340;
-    private const int ColLabel = 10;
-    private const int ColValue = 95;
-    private const int ColBtn   = 140;
-    private const int RowH     = 17;
+    private int PanelW => _bg?.Width ?? 172;
+    private int PanelH => _bg?.Height ?? 337;
+
+    private static readonly Color ValueColor = new(51, 42, 33);
+
+    private bool _dragging;
+    private Vector2 _dragOff;
 
     public StatsInfo(WzTextureLoader loader, WzPackage? ui, BuiltInFont? font)
     {
+        _loader = loader;
         _font = font;
         IsVisible = false;
-        Position = new Vector2(10, 80);
+        Position = new Vector2(540, 100);
 
-        var stat = ui?.GetItem("UIWindow.img/Stat") as WzProperty;
-        _background = stat?.Get("backgrnd") is WzCanvas bc ? loader.Load(bc) : null;
+        var main = ui?.GetItem("UIWindow2.img/Stat/main") as WzProperty;
 
-        _btClose  = MakeBtn(loader, stat, "BtClose",  () => IsVisible = false);
-        _btDetail = MakeBtn(loader, stat, "BtDetail", () => _showDetail = !_showDetail);
+        _bg     = LoadCanvas(main, "backgrnd");
+        _bg2    = LoadCanvas(main, "backgrnd2");
+        _bg3    = LoadCanvas(main, "backgrnd3");
+        _cover0 = LoadCanvas(main, "cover0");
+        _cover1 = LoadCanvas(main, "cover1");
 
-        // + buttons — drawn conditionally in DrawStatRow, NOT in _allButtons loop
-        var apRoot = stat?.Get("BtAP") as WzProperty;
-        for (var i = 0; i < 4; i++)
-        {
-            var idx = i;
-            if (apRoot != null)
-                _apBtns[i] = new Button(loader, apRoot) { OnClick = () => SpendAP(idx) };
-        }
+        _apBtns[0] = MakeBtn(main, "BtHpUp",  () => OnHpUp?.Invoke());
+        _apBtns[1] = MakeBtn(main, "BtMpUp",  () => OnMpUp?.Invoke());
+        _apBtns[2] = MakeBtn(main, "BtStrUp", () => OnStrUp?.Invoke());
+        _apBtns[3] = MakeBtn(main, "BtDexUp", () => OnDexUp?.Invoke());
+        _apBtns[4] = MakeBtn(main, "BtIntUp", () => OnIntUp?.Invoke());
+        _apBtns[5] = MakeBtn(main, "BtLukUp", () => OnLukUp?.Invoke());
 
-        LayoutButtons();
+        _btDetailOpen  = MakeBtn(main, "BtDetailOpen",  () => SetDetail(true));
+        _btDetailClose = MakeBtn(main, "BtDetailClose", () => SetDetail(false));
+
+        _btAuto  = MakeBtn(main, "BtAuto",  () => AutoAssign(StatDerived.PrimaryStatFlag(JobId)));
+        _btAuto1 = MakeBtn(main, "BtAuto1", () => AutoAssign(0x40));   // pirate → STR
+        _btAuto2 = MakeBtn(main, "BtAuto2", () => AutoAssign(0x80));   // pirate → DEX
     }
 
-    // ── AP distribution ───────────────────────────────────────────────────────
-    private void SpendAP(int statIndex)
+    // ── Visibility helpers ────────────────────────────────────────────────────
+
+    /// <summary>Beginners (job 0/2001) at level ≤10 see covers over the ability
+    /// section; the AP-distribution controls are hidden.</summary>
+    private bool BeginnerCovered => (JobId % 1000 == 0 || JobId == 2001) && Level <= 10;
+
+    private bool IsPirate => (JobId / 100) % 10 == 5;
+
+    private void SetDetail(bool open)
+    {
+        DetailOpen = open;
+        OnDetailToggled?.Invoke(open);
+    }
+
+    private void AutoAssign(int statFlag)
     {
         if (AP <= 0) return;
-        AP--;
-        switch (statIndex)
+        OnAutoAssign?.Invoke(statFlag);
+    }
+
+    // ── Update ────────────────────────────────────────────────────────────────
+    public override void Update(GameTime gameTime)
+    {
+        if (!IsVisible)
         {
-            case 0: Str++; OnStrUp?.Invoke(); break;
-            case 1: Dex++; OnDexUp?.Invoke(); break;
-            case 2: Int++; OnIntUp?.Invoke(); break;
-            case 3: Luk++; OnLukUp?.Invoke(); break;
+            if (DetailOpen) SetDetail(false);   // closing the main window closes detail
+            return;
+        }
+
+        var m = Mouse.GetState();
+        if (_dragging)
+        {
+            if (m.LeftButton == ButtonState.Pressed)
+                Position = new Vector2(m.X, m.Y) - _dragOff;
+            else
+                _dragging = false;
+        }
+
+        var apOk = AP > 0 && !BeginnerCovered;
+        // STR/DEX/INT/LUK enabled when AP available; HP/MP additionally need Lv ≥ 20.
+        for (var i = 0; i < 6; i++)
+        {
+            if (_apBtns[i] == null) continue;
+            _apBtns[i]!.Enabled = i < 2 ? (apOk && Level >= 20) : apOk;
+            _apBtns[i]!.Position = Position;
+            _apBtns[i]!.Update(m.X, m.Y, m.LeftButton == ButtonState.Pressed);
+        }
+
+        foreach (var b in AutoButtons())
+        {
+            b.Enabled = apOk;
+            b.Position = Position;
+            b.Update(m.X, m.Y, m.LeftButton == ButtonState.Pressed);
+        }
+
+        var detail = DetailOpen ? _btDetailClose : _btDetailOpen;
+        if (detail != null)
+        {
+            detail.Position = Position;
+            detail.Update(m.X, m.Y, m.LeftButton == ButtonState.Pressed);
         }
     }
 
-    public void AutoAssignAP()
+    private IEnumerable<Button> AutoButtons()
     {
-        // Primary stat by job: STR=warrior, DEX=bowman, INT=mage, LUK=thief, 0=beginner→all STR
-        while (AP > 0) SpendAP(0);
+        if (BeginnerCovered) yield break;
+        if (IsPirate)
+        {
+            if (_btAuto1 != null) yield return _btAuto1;
+            if (_btAuto2 != null) yield return _btAuto2;
+        }
+        else if (_btAuto != null)
+        {
+            yield return _btAuto;
+        }
     }
 
-    // ── Update ───────────────────────────────────────────────────────────────
-    public override void Update(GameTime gameTime)
-    {
-        LayoutButtons();
-        foreach (var b in _apBtns)
-            if (b != null) b.Enabled = AP > 0;
-    }
-
-    // ── Draw ─────────────────────────────────────────────────────────────────
+    // ── Draw ──────────────────────────────────────────────────────────────────
     public override void Draw(SpriteBatch sb, Texture2D white)
     {
         if (!IsVisible) return;
 
-        var px = (int)Position.X;
-        var py = (int)Position.Y;
-        var h  = _showDetail ? PanelH + 80 : PanelH;
+        _bg?.Draw(sb, Position);
+        _bg2?.Draw(sb, Position);
+        _bg3?.Draw(sb, Position);
 
-        if (_background != null)
-            _background.Draw(sb, Position + new Vector2(PanelW / 2f, PanelH / 2f));
-        else
+        var covered = BeginnerCovered;
+        if (covered)
         {
-            sb.Draw(white, new Rectangle(px, py, PanelW, h), new Color(12, 12, 22, 235));
-            DrawBorder(sb, white, new Rectangle(px, py, PanelW, h));
+            _cover0?.Draw(sb, Position);
+            _cover1?.Draw(sb, Position);
         }
 
-        _font?.Draw(sb, "Character Stats", new Vector2(px + 34, py + 5), new Color(220, 200, 150));
+        // Info section (always shown).
+        DrawValue(sb, Name, RowName);
+        DrawValue(sb, Job, RowJob);
+        DrawValue(sb, Level.ToString(), RowLevel);
+        DrawValue(sb, string.IsNullOrEmpty(Guild) ? "-" : Guild, RowGuild);
+        DrawValue(sb, $"{Hp} / {MaxHp}", RowHp);
+        DrawValue(sb, $"{Mp} / {MaxMp}", RowMp);
+        DrawValue(sb, ExpText(), RowExp);
+        DrawValue(sb, Fame.ToString(), RowFame);
 
-        float y = py + 22;
-        DrawRow(sb, "Level",    Level.ToString(), px, ref y, false);
-        DrawRow(sb, "Job",      Job,              px, ref y, false);
-        y += 4;
-
-        // AP banner (shown when AP > 0)
-        if (AP > 0)
+        if (!covered)
         {
-            sb.Draw(white, new Rectangle(px + 4, (int)y - 2, PanelW - 8, RowH + 2), new Color(60, 50, 0, 180));
-            DrawBorder(sb, white, new Rectangle(px + 4, (int)y - 2, PanelW - 8, RowH + 2), new Color(200, 160, 0));
-        }
-        _font?.Draw(sb, "AP", new Vector2(px + ColLabel, y), new Color(200, 200, 200));
-        _font?.Draw(sb, AP.ToString(), new Vector2(px + ColValue, y),
-            AP > 0 ? new Color(255, 220, 60) : new Color(160, 160, 160));
-        y += RowH + 4;
+            // AP — right-aligned to x=85.
+            var apText = AP.ToString();
+            var apW = _font?.Measure(apText).X ?? 0f;
+            _font?.Draw(sb, apText, new Vector2(Position.X + ApRightEdge - apW, Position.Y + RowAp), ValueColor);
 
-        DrawStatRow(sb, white, "STR", Str, px, ref y, 0);
-        DrawStatRow(sb, white, "DEX", Dex, px, ref y, 1);
-        DrawStatRow(sb, white, "INT", Int, px, ref y, 2);
-        DrawStatRow(sb, white, "LUK", Luk, px, ref y, 3);
-        y += 4;
+            DrawValue(sb, StatText(Str, StrBonus), RowStr);
+            DrawValue(sb, StatText(Dex, DexBonus), RowDex);
+            DrawValue(sb, StatText(Int, IntBonus), RowInt);
+            DrawValue(sb, StatText(Luk, LukBonus), RowLuk);
 
-        DrawRow(sb, "HP",    $"{Hp}/{MaxHp}", px, ref y, false);
-        DrawRow(sb, "MP",    $"{Mp}/{MaxMp}", px, ref y, false);
-        y += 4;
-
-        if (_showDetail)
-        {
-            DrawRow(sb, "ATK",   Atk.ToString(),   px, ref y, false);
-            DrawRow(sb, "DEF",   Def.ToString(),   px, ref y, false);
-            DrawRow(sb, "SPD",   Speed.ToString(), px, ref y, false);
-            DrawRow(sb, "JUMP",  Jump.ToString(),  px, ref y, false);
+            for (var i = 0; i < 6; i++) _apBtns[i]?.Draw(sb);
+            foreach (var b in AutoButtons()) b.Draw(sb);
         }
 
-        // Auto-assign button (when AP > 0)
-        if (AP > 0 && _font != null)
-        {
-            var btnR = new Rectangle(px + PanelW - 80, (int)y + 2, 74, 16);
-            sb.Draw(white, btnR, new Color(40, 40, 10));
-            DrawBorder(sb, white, btnR, new Color(180, 150, 30));
-            _font.Draw(sb, "Auto Assign", new Vector2(btnR.X + 4, btnR.Y + 2), new Color(220, 200, 60));
-        }
-
-        foreach (var b in _allButtons) b?.Draw(sb);
-        _btClose?.Draw(sb);
-        _btDetail?.Draw(sb);
+        (DetailOpen ? _btDetailClose : _btDetailOpen)?.Draw(sb);
     }
 
-    private void DrawStatRow(SpriteBatch sb, Texture2D white, string label, int value,
-        int px, ref float y, int btnIdx)
+    private void DrawValue(SpriteBatch sb, string text, int rowY)
+        => _font?.Draw(sb, text, new Vector2(Position.X + ColValue, Position.Y + rowY), ValueColor);
+
+    private string ExpText()
     {
-        _font?.Draw(sb, label, new Vector2(px + ColLabel, y), new Color(200, 200, 200));
-        _font?.Draw(sb, value.ToString(), new Vector2(px + ColValue, y), Color.White);
-        // + button (only when AP > 0)
-        if (AP > 0 && _apBtns[btnIdx] != null)
-        {
-            _apBtns[btnIdx]!.Position = new Vector2(px + ColBtn, y - 2);
-            _apBtns[btnIdx]!.Draw(sb);
-        }
-        else if (AP > 0 && _font != null)
-        {
-            // Fallback drawn + button
-            var r = new Rectangle(px + ColBtn, (int)y - 2, 18, 14);
-            sb.Draw(white, r, new Color(30, 60, 30));
-            DrawBorder(sb, white, r, new Color(80, 160, 80));
-            _font.Draw(sb, "+", new Vector2(r.X + 4, r.Y), new Color(100, 220, 100));
-        }
-        y += RowH;
+        var next = ExpTable.GetNextLevelExp(Level);
+        var pct = next > 0 ? (int)((double)Exp / next * 100.0) : 0;
+        return $"{Exp} ({pct}%)";
     }
 
-    private void DrawRow(SpriteBatch sb, string label, string value,
-        int px, ref float y, bool highlight)
-    {
-        _font?.Draw(sb, label, new Vector2(px + ColLabel, y),
-            highlight ? new Color(220, 200, 100) : new Color(200, 200, 200));
-        _font?.Draw(sb, value, new Vector2(px + ColValue, y), Color.White);
-        y += RowH;
-    }
+    private static string StatText(int baseValue, int bonus)
+        => bonus != 0 ? $"{baseValue + bonus} ({baseValue}{bonus:+0;-0})" : baseValue.ToString();
 
     // ── Input ─────────────────────────────────────────────────────────────────
     public override bool HandleMouseButton(int x, int y, bool down)
     {
         if (!IsVisible) return false;
-        foreach (var b in _allButtons)
-            if (b?.HandleMouseButton(x, y, down) == true) return true;
-        if (_btClose?.HandleMouseButton(x, y, down) == true) return true;
-        if (_btDetail?.HandleMouseButton(x, y, down) == true) return true;
-        if (AP > 0)
-            foreach (var b in _apBtns)
-                if (b?.HandleMouseButton(x, y, down) == true) return true;
 
-        // Auto-assign hit test
-        if (down && AP > 0)
+        // Detail toggle.
+        var detail = DetailOpen ? _btDetailClose : _btDetailOpen;
+        if (detail?.HandleMouseButton(x, y, down) == true) return true;
+
+        if (!BeginnerCovered)
         {
-            var py = (int)Position.Y + PanelH - 50;
-            var btnR = new Rectangle((int)Position.X + PanelW - 80, py, 74, 16);
-            if (btnR.Contains(x, y)) { AutoAssignAP(); return true; }
+            for (var i = 0; i < 6; i++)
+                if (_apBtns[i]?.HandleMouseButton(x, y, down) == true) return true;
+            foreach (var b in AutoButtons())
+                if (b.HandleMouseButton(x, y, down) == true) return true;
         }
 
-        return new Rectangle((int)Position.X, (int)Position.Y, PanelW,
-            _showDetail ? PanelH + 80 : PanelH).Contains(x, y);
+        // Close (the X is baked into the title-bar art at top-right; no WZ node).
+        var closeRect = new Rectangle((int)Position.X + PanelW - 20, (int)Position.Y + 5, 15, 14);
+        if (down && closeRect.Contains(x, y)) { IsVisible = false; return true; }
+
+        // Drag by the title bar (top strip).
+        var titleBar = new Rectangle((int)Position.X, (int)Position.Y, PanelW, 22);
+        if (down && titleBar.Contains(x, y))
+        {
+            _dragging = true;
+            _dragOff = new Vector2(x - Position.X, y - Position.Y);
+            return true;
+        }
+
+        return new Rectangle((int)Position.X, (int)Position.Y, PanelW, PanelH).Contains(x, y);
     }
 
     public override bool OnKeyPress(Keys key)
@@ -240,36 +304,13 @@ public sealed class StatsInfo : GamePanel
         return false;
     }
 
-    // ── Helpers ──────────────────────────────────────────────────────────────
-    private void LayoutButtons()
-    {
-        if (_btClose  != null) _btClose.Position  = Position + new Vector2(PanelW - 18, 4);
-        if (_btDetail != null) _btDetail.Position = Position + new Vector2(PanelW - 40, PanelH - 20);
-    }
+    // ── Helpers ───────────────────────────────────────────────────────────────
+    private WzSprite? LoadCanvas(WzProperty? root, string name)
+        => root?.Get(name) is WzCanvas c ? _loader.Load(c) : null;
 
-    private Button? MakeBtn(WzTextureLoader loader, WzProperty? root, string name, Action onClick)
+    private Button? MakeBtn(WzProperty? root, string name, Action onClick)
     {
-        var pr = root?.Get(name) as WzProperty;
-        if (pr is null) return null;
-        var b = new Button(loader, pr) { OnClick = onClick };
-        _allButtons.Add(b);
-        return b;
-    }
-
-    private static void DrawBorder(SpriteBatch sb, Texture2D white, Rectangle r)
-    {
-        var c = new Color(70, 70, 90);
-        sb.Draw(white, new Rectangle(r.X, r.Y, r.Width, 1), c);
-        sb.Draw(white, new Rectangle(r.X, r.Bottom - 1, r.Width, 1), c);
-        sb.Draw(white, new Rectangle(r.X, r.Y, 1, r.Height), c);
-        sb.Draw(white, new Rectangle(r.Right - 1, r.Y, 1, r.Height), c);
-    }
-
-    private static void DrawBorder(SpriteBatch sb, Texture2D white, Rectangle r, Color c)
-    {
-        sb.Draw(white, new Rectangle(r.X, r.Y, r.Width, 1), c);
-        sb.Draw(white, new Rectangle(r.X, r.Bottom - 1, r.Width, 1), c);
-        sb.Draw(white, new Rectangle(r.X, r.Y, 1, r.Height), c);
-        sb.Draw(white, new Rectangle(r.Right - 1, r.Y, 1, r.Height), c);
+        if (root?.Get(name) is not WzProperty pr) return null;
+        return new Button(_loader, pr) { OnClick = onClick };
     }
 }

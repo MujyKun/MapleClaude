@@ -60,14 +60,39 @@ public sealed class CharacterRenderer
         return info?.Get("walk") switch { int i => i != 1, short s => s != 1, _ => false };
     }
 
-    /// <summary>Number of body animation frames for a stance (e.g. walk1 = 4), for looping.</summary>
-    public int FrameCount(AvatarLook look, Stance stance)
+    /// <summary>Number of body animation frames for an action/stance (e.g. walk1 = 4,
+    /// ladder = 2, swingO1 = 3), for looping or for timing a one-shot attack.</summary>
+    public int FrameCount(AvatarLook look, string actionKey)
     {
         if (_characterWz is null) return 1;
         var bodyImg = $"000{2000 + look.Skin:D5}.img";
         var n = 0;
-        while (_characterWz.GetItem($"{bodyImg}/{stance.ToWzKey()}/{n}") != null) n++;
+        while (_characterWz.GetItem($"{bodyImg}/{actionKey}/{n}") != null) n++;
         return Math.Max(1, n);
+    }
+
+    /// <summary>Frame count for a movement <see cref="Stance"/> (convenience overload).</summary>
+    public int FrameCount(AvatarLook look, Stance stance) => FrameCount(look, stance.ToWzKey());
+
+    private readonly Random _rng = new();
+
+    /// <summary>Choose the body action a basic attack should play, from the equipped
+    /// weapon's <c>info/attack</c> type (or <c>proneStab</c> when prone). One of the
+    /// candidate actions is picked at random per call, so swings visibly cycle poses.
+    /// See <see cref="AttackAction"/>.</summary>
+    public string PickAttackAction(AvatarLook look, bool prone) =>
+        AttackAction.Pick(WeaponAttackType(look), prone, _rng);
+
+    // The weapon's info/attack int (1 = 1H sword/axe/mace/dagger, 2 = spear, 3 = bow,
+    // 4 = crossbow, 5 = 2H, 6 = wand/staff, 7 = claw, 9 = gun). 0 = bare-handed.
+    private int WeaponAttackType(AvatarLook look)
+    {
+        var w = 0;
+        if (look.HairEquip.TryGetValue(BodyPartSlot.Weapon, out var wid) && wid != 0) w = wid;
+        else if (look.HairEquip.TryGetValue(BodyPartSlot.CashWeapon, out var cw) && cw != 0) w = cw;
+        if (w == 0) return 0;
+        var info = _characterWz?.GetItem($"Weapon/{w:D8}.img/info") as WzProperty;
+        return info?.Get("attack") switch { int i => i, short s => s, long l => (int)l, _ => 0 };
     }
 
     private sealed record AvatarPart(WzSprite Sprite, IReadOnlyDictionary<string, Vector2> Map, string Z);
@@ -113,10 +138,7 @@ public sealed class CharacterRenderer
         _nextBlinkIn = 2000 + _blinkRng.Next(3000);              // IDB: 2000 + rand()%3000
     }
 
-    /// <summary>
-    /// Draw the avatar with its body pen at <paramref name="position"/> (the body's
-    /// origin point). Parts are stitched relative to it via their anchor maps.
-    /// </summary>
+    /// <summary>Draw the avatar in a movement <see cref="Stance"/> (convenience overload).</summary>
     public void Draw(
         SpriteBatch sb,
         AvatarLook look,
@@ -124,15 +146,31 @@ public sealed class CharacterRenderer
         Stance stance,
         int frame,
         Vector2 position,
+        bool facingLeft) =>
+        Draw(sb, look, stat, stance.ToWzKey(), frame, position, facingLeft);
+
+    /// <summary>
+    /// Draw the avatar with its body pen at <paramref name="position"/> (the body's
+    /// origin point), in the WZ action keyed by <paramref name="actionKey"/> (a
+    /// movement stance such as <c>walk1</c>/<c>ladder</c> or an attack action such
+    /// as <c>swingO1</c>). Parts are stitched relative to the body via their anchor maps.
+    /// </summary>
+    public void Draw(
+        SpriteBatch sb,
+        AvatarLook look,
+        CharacterStat? stat,
+        string actionKey,
+        int frame,
+        Vector2 position,
         bool facingLeft)
     {
         _ = stat;
         if (_characterWz is null) return;
 
-        var st = stance.ToWzKey();
+        var st = actionKey;
         // Ladder/rope are back-facing stances: the body/head/cap already use their back frames; hide the
         // (front-only) face and pull the hair's back frames so we don't draw a face on the back of the head.
-        var isClimbing = stance is Stance.Ladder or Stance.Rope;
+        var isClimbing = actionKey is "ladder" or "rope";
         var skin = look.Skin;
         var bodyId = 2000 + skin;
         var bodyImg = $"000{bodyId:D5}.img";   // 0000200<skin>.img
@@ -140,6 +178,9 @@ public sealed class CharacterRenderer
 
         var body = LoadPart($"{bodyImg}/{st}/{frame}/body");
         var arm = LoadPart($"{bodyImg}/{st}/{frame}/arm");
+        // Attack frames (swingT1, swingP1, …) split the limb into arm (z=arm) and a
+        // separate armOverHair (z=armOverHair) drawn above the hair; load both.
+        var armOverHair = LoadPart($"{bodyImg}/{st}/{frame}/armOverHair");
         var hand = LoadPart($"{bodyImg}/{st}/{frame}/hand");
         var head = LoadPart($"{headImg}/{st}/{frame}/head");
         var face = LoadFace(look.Face);
@@ -211,6 +252,7 @@ public sealed class CharacterRenderer
 
         Emit(body, bodyPen);
         Emit(arm, armPen);
+        Emit(armOverHair, Align(armOverHair, body, bodyPen, "navel"));
         var handPen = Align(hand, body, bodyPen, "navel");
         Emit(hand, handPen);
         Emit(head, headPen);

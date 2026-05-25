@@ -1,9 +1,11 @@
 namespace MapleClaude.Character;
 
 /// <summary>
-/// Player animation stances. Names match the v95 WZ data subkeys under
-/// <c>Character/0000200X.img/&lt;stance&gt;</c> exactly (case-sensitive) so
-/// they can be used as lookup keys directly.
+/// Player <em>movement</em> stances — the looping animations driven by where the
+/// character is and how it's moving. Names match the v95 WZ data subkeys under
+/// <c>Character/0000200X.img/&lt;stance&gt;</c> exactly (case-sensitive) so they can
+/// be used as lookup keys directly. One-shot attack animations (swingO1, stabO1, …)
+/// are not stances — they live in <see cref="AttackAction"/>.
 /// </summary>
 public enum Stance
 {
@@ -19,7 +21,6 @@ public enum Stance
     Sit,
     Prone,
     ProneStab,
-    Swing,
     Dead,
 }
 
@@ -39,9 +40,6 @@ public static class StanceExtensions
         Stance.Sit => "sit",
         Stance.Prone => "prone",
         Stance.ProneStab => "proneStab",
-        // v95 one-handed-sword basic swing; CharacterRenderer falls back to a
-        // resolvable key if the body doesn't have this exact animation.
-        Stance.Swing => "swingO1",
         Stance.Dead => "dead",
         _ => "stand1",
     };

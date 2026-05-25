@@ -175,6 +175,28 @@ public sealed class NpcLook
         }
     }
 
+    /// <summary>True once at least one animation state has loaded real frames.</summary>
+    public bool HasFrames => _loaded;
+
+    /// <summary>The current frame's sprite for the active state, or null if none loaded.</summary>
+    public WzSprite? CurrentFrame =>
+        _anims.TryGetValue(_state, out var frames) && frames.Count > 0
+            ? frames[Math.Min(_frame, frames.Count - 1)].sprite
+            : null;
+
+    /// <summary>
+    /// Draws only the current animation frame at <paramref name="screenPos"/> — no name tag and
+    /// no placeholder box. Used by the NPC dialog speaker slot, which supplies its own frame and
+    /// name rendering. Returns false when no frame is available to draw.
+    /// </summary>
+    public bool DrawFrameOnly(SpriteBatch sb, Vector2 screenPos, bool flip = false)
+    {
+        var sprite = CurrentFrame;
+        if (sprite is null) return false;
+        sprite.Draw(sb, screenPos, flip ? SpriteEffects.FlipHorizontally : SpriteEffects.None);
+        return true;
+    }
+
     public void FaceLeft(bool left) => _facingLeft = left;
 
     public Rectangle GetScreenBounds(Vector2 screenPos) =>

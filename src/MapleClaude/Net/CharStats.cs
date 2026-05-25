@@ -25,4 +25,11 @@ public sealed class CharStats
     public int Exp { get; set; }
     public int AP { get; set; }
     public int SP { get; set; }
+
+    /// <summary>Fame / popularity (POP, mask <c>0x20000</c>). May be negative.</summary>
+    public int Fame { get; set; }
+
+    /// <summary>Guild name; empty renders as "-" in the Stat window (guild data
+    /// arrives via a separate guild packet, not <c>StatChanged</c>).</summary>
+    public string Guild { get; set; } = string.Empty;
 }

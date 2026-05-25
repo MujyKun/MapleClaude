@@ -1,5 +1,6 @@
 using MapleClaude.App;
 using MapleClaude.Character;
+using MapleClaude.Debug;
 using MapleClaude.Domain;
 using MapleClaude.Net;
 using MapleClaude.Net.Handlers;
@@ -73,6 +74,7 @@ public sealed class GameStage : Stage
     private ItemInventory? _item;
     private SkillBook? _skill;
     private StatsInfo? _stats;
+    private StatDetailInfo? _statDetail;
     private QuestLog? _quest;
     private KeyConfig? _keyConfig;
     private QuickSlotConfig? _quickSlotConfig;
@@ -87,11 +89,14 @@ public sealed class GameStage : Stage
 
     // Modal panels
     private NpcTalk? _npcTalk;
+    private ScriptSubst? _npcSubst;
+    private BuiltInFont? _dlgBody, _dlgBold, _dlgName;
     private Shop? _shop;
     private Trunk? _trunk;
     private Messenger? _messengerWin;
     private Notice? _notice;
     private QuitConfirmOverlay? _quitConfirm;
+    private GameMenu? _gameMenu;   // authentic CUIGameMenu (ESC / status-bar System button)
 
     private readonly List<GamePanel> _panels = new();
     private GamePacketHandler? _netHandler;
@@ -190,6 +195,23 @@ public sealed class GameStage : Stage
         var font = Game.Font;
         var basicFont = Game.BasicFont;
 
+        // Authentic NPC-dialog fonts: A12M body (12px) + bold (#e), A11M name (11px).
+        // BuiltInFont rasterises a system TrueType face, which is what the client's IWzFont does.
+        _dlgBody = new BuiltInFont(GraphicsDevice, "Arial", 12f, System.Drawing.GraphicsUnit.Pixel,
+            System.Drawing.Text.TextRenderingHint.AntiAlias, "Malgun Gothic");
+        _dlgBold = new BuiltInFont(GraphicsDevice, "Arial", 12f, System.Drawing.GraphicsUnit.Pixel,
+            System.Drawing.Text.TextRenderingHint.AntiAlias, "Malgun Gothic", System.Drawing.FontStyle.Bold);
+        _dlgName = new BuiltInFont(GraphicsDevice, "Arial", 11f, System.Drawing.GraphicsUnit.Pixel,
+            System.Drawing.Text.TextRenderingHint.AntiAlias, "Malgun Gothic");
+        _npcSubst = new ScriptSubst
+        {
+            ItemName  = Game.Names.ItemName,
+            NpcName   = Game.Names.NpcName,
+            MobName   = Game.Names.MobName,
+            MapName   = Game.Names.MapName,
+            SkillName = Game.Names.SkillName,
+        };
+
         // Camera — starts at screen centre, follows player
         _camera = new GameCamera(Vector2.Zero)
         {
@@ -220,13 +242,29 @@ public sealed class GameStage : Stage
         _chatBar.Bar = _statusBar;   // chat aligns to the status bar's authentic chat-input rect
         _miniMap = new MiniMap(_loader, _ui, font, _logger) { IsVisible = true };
         _buffList = new BuffList(_loader, _ui, font) { IsVisible = true };
-        _equip = new EquipInventory(_loader, _ui, font);
-        _item = new ItemInventory(_loader, _ui, font);
+        var iconLoader = new ItemIconLoader(_loader, _charWz, Game.ItemWz);
+        _equip = new EquipInventory(_loader, _ui, font, iconLoader);
+        _item = new ItemInventory(_loader, _ui, font, iconLoader);
         _item.OnItemActivate = OnInventoryItemActivate;
+        // Live-tunable slot-grid origin (drag in MAPLECLAUDE_DEBUG mode) — the one
+        // inventory coordinate the WZ tree doesn't carry (the client hardcodes it).
+        Game.DebugRegistry.Register(new DebugItem("Inventory", "Slot base",
+            () => _item!.SlotBase, v => _item!.SlotBase = v)
+        {
+            GetScreenPos  = () => _item!.Position + _item.SlotBase,
+            SetFromScreen = s => _item!.SlotBase = s - _item!.Position,
+        });
         _skill = new SkillBook(_loader, _ui, font);
         _skill.OnSkillUp = id => SendIfConnected(GameSender.SkillUp(id));
         _skill.OnSkillCast = CastSkill;
         _stats = new StatsInfo(_loader, _ui, font);
+        _statDetail = new StatDetailInfo(_loader, _ui, font);
+        _stats.OnDetailToggled = open =>
+        {
+            if (_statDetail == null) return;
+            _statDetail.Position = _stats!.Position + new Vector2(172, 90);
+            _statDetail.IsVisible = open;
+        };
         _quest = new QuestLog(_loader, _ui, font);
         _quest.OnResign = id =>
         {
@@ -237,7 +275,7 @@ public sealed class GameStage : Stage
         _keyConfig.OnOpenQuickSlot = () => _quickSlotConfig!.Open();
         _optionMenu = new OptionMenu(_loader, _ui, font);
         _charInfo = new CharInfo(_loader, _ui, font);
-        _npcTalk = new NpcTalk(_loader, _ui, font);
+        _npcTalk = new NpcTalk(_loader, _ui, _npcWz, _dlgBody, _dlgBold, _dlgName, _npcSubst);
         _shop = new Shop(_loader, _ui, font);
         _shop.OnBuy = (slot, itemId, price, count) =>
         {
@@ -292,6 +330,7 @@ public sealed class GameStage : Stage
         _panels.Add(_item);
         _panels.Add(_skill);
         _panels.Add(_stats);
+        _panels.Add(_statDetail);
         _panels.Add(_quest);
         _panels.Add(_keyConfig);
         _panels.Add(_quickSlotConfig);
@@ -334,10 +373,20 @@ public sealed class GameStage : Stage
         _statusBar.OnCommunity = () => _userList!.IsVisible     = !_userList.IsVisible;
         _statusBar.OnMessenger = () => _messengerWin!.IsVisible = !_messengerWin.IsVisible;
         _statusBar.OnRanking   = () => _chatBar?.AddLine("Rankings are not available on this server.", new Color(200, 200, 120));
-        // System pop-up items (Channel reuses OnChannel; KeySetting → OnKeys; Quit → OnQuit).
-        _statusBar.OnGameOption   = () => _optionMenu!.IsVisible = !_optionMenu.IsVisible;
-        _statusBar.OnSystemOption = () => _optionMenu!.IsVisible = !_optionMenu.IsVisible;
-        _statusBar.OnJoyPad       = () => _chatBar?.AddLine("Gamepad is not supported.", new Color(200, 200, 120));
+        // ── Authentic in-game system menu (CUIGameMenu) ─────────────────────────────────────────
+        // ESC and the status-bar System button both open it; activating an item closes the menu and
+        // routes to the matching panel. Change Skin / KeySetting / JoyPad aren't in the v95 menu.
+        _gameMenu = new GameMenu(_loader, _ui, font)
+        {
+            OnChannel      = () => _channelSelect!.IsVisible = true,
+            OnSkin         = () => _chatBar?.AddLine("UI skin change is not supported.", new Color(200, 200, 120)),
+            OnGameOption   = () => _optionMenu!.IsVisible = true,
+            OnSystemOption = () => _optionMenu!.IsVisible = true,
+            OnQuit         = () => _quitConfirm!.IsVisible = true,
+        };
+        var gmPp = Game.GraphicsDevice.PresentationParameters;
+        _gameMenu.Relayout(gmPp.BackBufferWidth, gmPp.BackBufferHeight);
+        _statusBar.OnSystem = () => _gameMenu!.Open();
         _chatBar!.OnSendChat = OnChatSubmit;
 
         _channelSelect.OnChannelChange = ch =>
@@ -351,40 +400,14 @@ public sealed class GameStage : Stage
         // ── Network packet handler ────────────────────────────────────────────
         _netHandler = new GamePacketHandler(_loggerFactory.CreateLogger<GamePacketHandler>());
 
-        _netHandler.OnStatChanged = stats =>
+        _netHandler.OnStatChanged = (stats, mask) =>
         {
             _charStats = stats;
             if (!string.IsNullOrEmpty(stats.Name)) _myName = stats.Name;
-            // Feed to UI panels
-            if (_stats != null)
-            {
-                _stats.Level  = stats.Level;
-                _stats.Job    = JobName(stats.JobId);
-                _stats.Str    = stats.Str;
-                _stats.Dex    = stats.Dex;
-                _stats.Int    = stats.Int;
-                _stats.Luk    = stats.Luk;
-                _stats.Hp     = stats.Hp;   _stats.MaxHp = stats.MaxHp;
-                _stats.Mp     = stats.Mp;   _stats.MaxMp = stats.MaxMp;
-                _stats.AP     = stats.AP;   _stats.SP    = stats.SP;
-            }
-            if (_statusBar != null)
-            {
-                _statusBar.Level    = stats.Level;
-                _statusBar.CharName = stats.Name;
-                _statusBar.JobName  = JobName(stats.JobId);
-                _statusBar.Hp       = stats.Hp;   _statusBar.MaxHp = stats.MaxHp;
-                _statusBar.Mp       = stats.Mp;   _statusBar.MaxMp = stats.MaxMp;
-                _statusBar.Exp      = stats.Exp;
-            }
-            if (_charInfo != null)
-            {
-                _charInfo.CharName = stats.Name;
-                _charInfo.Level    = stats.Level;
-                _charInfo.Job      = JobName(stats.JobId);
-            }
-            if (_skill != null) _skill.SP = stats.SP;
-            if (stats.Level > 0)
+            PushCharStats(stats);
+            // Only celebrate a level-up when this burst actually carried LEVEL —
+            // the snapshot is persistent, so stats.Level is set on every packet.
+            if ((mask & 0x10) != 0 && stats.Level > 0)
                 _messenger?.ShowLevelUp(stats.Level);
         };
 
@@ -409,13 +432,21 @@ public sealed class GameStage : Stage
             Game.Session.Send(GameSender.TransferChannel(ch - 1));
         };
 
-        // Wire AP distribution to server packets
+        // Wire AP distribution to server packets. The server replies with
+        // StatChanged (AP + the raised stat) — we never mutate stats locally.
         if (_stats != null)
         {
-            _stats.OnStrUp = () => { if (Game.Session.IsConnected) Game.Session.Send(GameSender.UserAbilityUp(GameSender.MapleStat.Str)); };
-            _stats.OnDexUp = () => { if (Game.Session.IsConnected) Game.Session.Send(GameSender.UserAbilityUp(GameSender.MapleStat.Dex)); };
-            _stats.OnIntUp = () => { if (Game.Session.IsConnected) Game.Session.Send(GameSender.UserAbilityUp(GameSender.MapleStat.Int)); };
-            _stats.OnLukUp = () => { if (Game.Session.IsConnected) Game.Session.Send(GameSender.UserAbilityUp(GameSender.MapleStat.Luk)); };
+            _stats.OnHpUp  = () => SendIfConnected(GameSender.UserAbilityUp(GameSender.MapleStat.MaxHp));
+            _stats.OnMpUp  = () => SendIfConnected(GameSender.UserAbilityUp(GameSender.MapleStat.MaxMp));
+            _stats.OnStrUp = () => SendIfConnected(GameSender.UserAbilityUp(GameSender.MapleStat.Str));
+            _stats.OnDexUp = () => SendIfConnected(GameSender.UserAbilityUp(GameSender.MapleStat.Dex));
+            _stats.OnIntUp = () => SendIfConnected(GameSender.UserAbilityUp(GameSender.MapleStat.Int));
+            _stats.OnLukUp = () => SendIfConnected(GameSender.UserAbilityUp(GameSender.MapleStat.Luk));
+            _stats.OnAutoAssign = flag =>
+            {
+                var ap = _charStats.AP;
+                if (ap > 0) SendIfConnected(GameSender.UserAbilityMassUp(new[] { (flag, ap) }));
+            };
         }
 
         // Wire SkillBook SP-up to server
@@ -440,6 +471,7 @@ public sealed class GameStage : Stage
             if ((a.Mask & 0x10)  != 0 && a.Level > 0) { if (_stats != null) _stats.Level = a.Level; if (_statusBar != null) _statusBar.Level = a.Level; }
             if ((a.Mask & 0x4000)!= 0) { if (_stats != null) _stats.AP = a.Ap; }
             if ((a.Mask & 0x8000)!= 0) { if (_stats != null && _skill != null) _skill.SP = a.Sp; }
+            if ((a.Mask & 0x40000)!=0) { if (_item != null) _item.Meso = a.Meso; }   // MONEY
         };
 
         // ── Loot / EXP / meso popups (Message 38) ─────────────────────────────
@@ -666,7 +698,7 @@ public sealed class GameStage : Stage
                         if (op.Item is null) break;
                         if (op.InvType == InventoryType.Equipped)
                         {
-                            _equip?.SetEquipped(op.Pos, ItemDisplayName(op.Item));
+                            _equip?.SetEquipped(op.Pos, op.Item.ItemId, ItemDisplayName(op.Item));
                         }
                         else if (tab >= 0)
                         {
@@ -677,14 +709,36 @@ public sealed class GameStage : Stage
                     case 1: // ItemNumber — quantity changed
                         if (tab >= 0) _item?.SetSlotQuantity(tab, op.Pos, op.Quantity);
                         break;
-                    case 2: // Position — move (NewPos 0 = removed from this tab)
-                        if (op.InvType == InventoryType.Equipped || op.Pos < 0 || op.NewPos < 0)
+                    case 2: // Position — move. Equipped slots are negative body parts:
+                            // NewPos<0 = equipping (inv -> worn), Pos<0 = unequipping (worn -> inv).
+                        if (op.NewPos < 0)
                         {
-                            // Equip/unequip move — equipped panel + avatar refresh come via
-                            // separate packets; the stat change arrives via StatChanged.
-                            break;
+                            // Equip: the item is still in the equip tab at op.Pos. Move it onto
+                            // the worn body part and clear the inventory cell.
+                            var moved = _item?.ItemAt(0, op.Pos);
+                            if (moved != null)
+                            {
+                                _equip?.SetEquipped(-op.NewPos, moved.Id, moved.Name);
+                                _item?.RemoveSlot(0, op.Pos);
+                            }
                         }
-                        if (tab >= 0) _item?.MoveSlot(tab, op.Pos, op.NewPos);
+                        else if (op.Pos < 0)
+                        {
+                            // Unequip: pull the worn item back into the equip tab at op.NewPos.
+                            if (_equip != null && _equip.TryGetEquipped(-op.Pos, out var uid, out var uname))
+                            {
+                                _equip.RemoveEquipped(-op.Pos);
+                                if (op.NewPos > 0)
+                                {
+                                    _item?.SetSlot(0, op.NewPos,
+                                        new ItemInventory.InvItem { Id = uid, Name = uname, Quantity = 1 });
+                                }
+                            }
+                        }
+                        else if (tab >= 0)
+                        {
+                            _item?.MoveSlot(tab, op.Pos, op.NewPos);
+                        }
                         break;
                     case 3: // DelItem
                         if (op.InvType == InventoryType.Equipped) _equip?.RemoveEquipped(op.Pos);
@@ -767,46 +821,48 @@ public sealed class GameStage : Stage
         fh.OnScriptMessage += args =>
         {
             if (_npcTalk is null) return;
-            _npcTalk.LoadPortrait(_npcWz, args.SpeakerId);
             // The answer we send back must echo the type the server sent.
             var type = args.MsgType;
+            var param = args.MessageParam;
             _dialogMsgType = type;
+            if (_npcSubst != null) _npcSubst.PlayerName = _myName;
+
             switch (type)
             {
                 case ScriptMessageType.AskMenu:
-                    var choices = ParseMenuChoices(args.Text);
-                    _npcTalk.ShowMenu(args.Text, choices);
+                    _npcTalk.ShowMenu(args.SpeakerId, param, args.Text);
                     _npcTalk.OnMenuChoice = choice => SendIfConnected(GameSender.ScriptAnswerNumber(type, choice));
+                    _npcTalk.OnClose      = ()     => SendIfConnected(GameSender.ScriptAnswerCancel(type));
                     break;
 
                 case ScriptMessageType.AskYesNo:
                 case ScriptMessageType.AskAccept:
-                    _npcTalk.Show(args.Text, NpcTalk.DialogType.YesNo);
-                    _npcTalk.OnYes = () => SendIfConnected(GameSender.ScriptAnswerSay(type, 1));
-                    _npcTalk.OnNo  = () => SendIfConnected(GameSender.ScriptAnswerSay(type, 0));
+                    _npcTalk.ShowYesNo(args.SpeakerId, param, args.Text, type == ScriptMessageType.AskAccept);
+                    _npcTalk.OnYes   = () => SendIfConnected(GameSender.ScriptAnswerSay(type, 1));
+                    _npcTalk.OnNo    = () => SendIfConnected(GameSender.ScriptAnswerSay(type, 0));
+                    _npcTalk.OnClose = () => SendIfConnected(GameSender.ScriptAnswerSay(type, -1));
                     break;
 
                 case ScriptMessageType.AskText:
                 case ScriptMessageType.AskBoxText:
-                    _npcTalk.ShowAskText(args.Text, args.DefaultText, args.MinLength, args.MaxLength);
+                    _npcTalk.ShowAskText(args.SpeakerId, param, args.Text, args.DefaultText,
+                        args.MinLength, args.MaxLength, type == ScriptMessageType.AskBoxText);
                     _npcTalk.OnTextConfirm = text => SendIfConnected(GameSender.ScriptAnswerText(type, text));
-                    _npcTalk.OnNo          = ()   => SendIfConnected(GameSender.ScriptAnswerCancel(type));
+                    _npcTalk.OnClose       = ()   => SendIfConnected(GameSender.ScriptAnswerCancel(type));
                     break;
 
                 case ScriptMessageType.AskNumber:
-                    _npcTalk.ShowAskNumber(args.Text, args.DefaultNum, args.MinNum, args.MaxNum);
+                    _npcTalk.ShowAskNumber(args.SpeakerId, param, args.Text, args.DefaultNum, args.MinNum, args.MaxNum);
                     _npcTalk.OnNumberConfirm = num => SendIfConnected(GameSender.ScriptAnswerNumber(type, num));
-                    _npcTalk.OnNo            = ()  => SendIfConnected(GameSender.ScriptAnswerCancel(type));
+                    _npcTalk.OnClose         = ()  => SendIfConnected(GameSender.ScriptAnswerCancel(type));
                     break;
 
-                default: // SAY (0) and rare types — a plain message with prev/next.
-                    _npcTalk.Show(args.Text,
-                        args.HasPrev && args.HasNext ? NpcTalk.DialogType.PrevNext
-                      : args.HasNext                ? NpcTalk.DialogType.Next
-                      : NpcTalk.DialogType.Ok);
-                    // SAY action: 1 = next/ok, -1 = prev, 0 = end.
+                default: // SAY (0), SayImage (1) and rare types — a message with optional prev/next.
+                    _npcTalk.ShowSay(args.SpeakerId, param, args.Text, args.HasPrev, args.HasNext);
+                    // SAY action: next/ok = 1, prev = 0, close = -1.
                     _npcTalk.OnOk = _npcTalk.OnNext = () => SendIfConnected(GameSender.ScriptAnswerSay(type, 1));
-                    _npcTalk.OnPrev = () => SendIfConnected(GameSender.ScriptAnswerSay(type, -1));
+                    _npcTalk.OnPrev  = () => SendIfConnected(GameSender.ScriptAnswerSay(type, 0));
+                    _npcTalk.OnClose = () => SendIfConnected(GameSender.ScriptAnswerSay(type, -1));
                     break;
             }
         };
@@ -841,6 +897,7 @@ public sealed class GameStage : Stage
         var h = pp.BackBufferHeight;
         foreach (var p in _panels) p.Relayout(w, h);
         _quitConfirm?.Relayout(w, h);
+        _gameMenu?.Relayout(w, h);
     }
 
     /// <summary>Apply a new in-game window resolution live: resize, then re-anchor the HUD. The
@@ -864,6 +921,9 @@ public sealed class GameStage : Stage
         Game.FieldHandlers.ClearAllExceptSetField();
         _loader?.Dispose();
         _loader = null;
+        _dlgBody?.Dispose(); _dlgBody = null;
+        _dlgBold?.Dispose(); _dlgBold = null;
+        _dlgName?.Dispose(); _dlgName = null;
         base.OnExit();
     }
 
@@ -1217,6 +1277,7 @@ public sealed class GameStage : Stage
         Quantity = it.Type == InvItemType.Bundle ? it.Quantity : 1,
         Tab = tab,
         Slot = slot,
+        Grade = it.Equip?.Grade ?? 0,   // potential rank → Quality dot
     };
 
     /// <summary>Load the initial inventory + skills delivered in SetField's CharacterData.</summary>
@@ -1243,6 +1304,7 @@ public sealed class GameStage : Stage
             return;
         }
         _item?.ClearAll();
+        if (_item != null) _item.Meso = args.Money;
         _equip?.ClearEquipped();
         foreach (var (invType, items) in args.Inventory)
         {
@@ -1251,7 +1313,7 @@ public sealed class GameStage : Stage
             {
                 if (invType == InventoryType.Equipped)
                 {
-                    _equip?.SetEquipped(pos, ItemDisplayName(item));
+                    _equip?.SetEquipped(pos, item.ItemId, ItemDisplayName(item));
                 }
                 else if (tab >= 0)
                 {
@@ -1327,7 +1389,7 @@ public sealed class GameStage : Stage
             if (_player != null)
             {
                 _player.Position = _physics.Position;
-                _player.UpdateFromPhysics(dt, _physics.Stance, _physics.FacingLeft);
+                _player.UpdateFromPhysics(dt, _physics.Stance, _physics.FacingLeft, _physics.ClimbMoving);
             }
             _camera.Target = _physics.Position;
 
@@ -1436,9 +1498,15 @@ public sealed class GameStage : Stage
                 : Enumerable.Empty<Vector2>());
         }
 
+        // Keep the detail window pinned to the right of the main Stat window
+        // (the original opens it at main top-left + (172, 90)).
+        if (_statDetail is { IsVisible: true } && _stats != null)
+            _statDetail.Position = _stats.Position + new Vector2(172, 90);
+
         // Panels
         foreach (var p in _panels) p.Update(gameTime);
         _quitConfirm?.Update(gameTime);
+        _gameMenu?.Update(gameTime);
     }
 
     public override void Draw(GameTime gameTime, SpriteBatch sb)
@@ -1516,6 +1584,8 @@ public sealed class GameStage : Stage
         foreach (var p in _panels)
             p.Draw(sb, Game.WhitePixel);
 
+        // System menu draws above the panels; the quit confirm sits above the menu.
+        _gameMenu?.Draw(sb, Game.WhitePixel);
         _quitConfirm?.Draw(sb, Game.WhitePixel);
     }
 
@@ -1534,6 +1604,7 @@ public sealed class GameStage : Stage
     {
         if (button != MouseButton.Left) return;
         if (_quitConfirm?.IsVisible == true) { _quitConfirm.HandleMouseButton(x, y, down); return; }
+        if (_gameMenu?.IsVisible == true) { _gameMenu.HandleMouseButton(x, y, down); return; }
         for (var i = _panels.Count - 1; i >= 0; i--)
         {
             var p = _panels[i];
@@ -1785,12 +1856,19 @@ public sealed class GameStage : Stage
     public override void OnKeyPress(Keys key)
     {
         if (_quitConfirm?.IsVisible == true) { _quitConfirm.OnKeyPress(key); return; }
+        // While the system menu is open it's modal — arrows/Enter/ESC drive it.
+        if (_gameMenu?.IsVisible == true) { _gameMenu.OnKeyPress(key); return; }
 
         foreach (var p in _panels)
             if (p.IsVisible && p.OnKeyPress(key)) return;
 
         // While typing in chat, the keyboard drives the text field — don't fire game hotkeys.
         if (TextField.Active != null) return;
+
+        // ESC opens the authentic in-game system menu (CUIGameMenu: Change Channel, Change Skin,
+        // Game Option, System Option, Quit Game). It's modal once open (handled above), so this only
+        // fires after any panel that wanted ESC has already consumed it to close itself.
+        if (key == Keys.Escape) { _gameMenu?.Open(); return; }
 
         // F12 always opens KeyConfig (meta-key — not itself bindable)
         if (key == Keys.F12) { ToggleKeyConfig(); return; }
@@ -1899,6 +1977,56 @@ public sealed class GameStage : Stage
         }
     }
 
+    // Push the merged stat snapshot into every panel that displays it. The
+    // snapshot is persistent, so unmasked fields keep their prior values; the
+    // character name lives in _myName (StatChanged carries no name).
+    private void PushCharStats(CharStats stats)
+    {
+        if (_stats != null)
+        {
+            _stats.Name  = _myName;
+            _stats.JobId = stats.JobId;
+            _stats.Job   = JobName(stats.JobId);
+            _stats.Level = stats.Level;
+            _stats.Exp   = stats.Exp;
+            _stats.Fame  = stats.Fame;
+            _stats.Guild = stats.Guild;
+            _stats.Str   = stats.Str;
+            _stats.Dex   = stats.Dex;
+            _stats.Int   = stats.Int;
+            _stats.Luk   = stats.Luk;
+            _stats.Hp    = stats.Hp;   _stats.MaxHp = stats.MaxHp;
+            _stats.Mp    = stats.Mp;   _stats.MaxMp = stats.MaxMp;
+            _stats.AP    = stats.AP;   _stats.SP    = stats.SP;
+        }
+        if (_statDetail != null)
+        {
+            _statDetail.Inputs = new StatInputs
+            {
+                JobId = stats.JobId,
+                Str = stats.Str, Dex = stats.Dex, Int = stats.Int, Luk = stats.Luk,
+                MaxHp = stats.MaxHp, MaxMp = stats.MaxMp,
+                Speed = 100, Jump = 100,
+            };
+        }
+        if (_statusBar != null)
+        {
+            _statusBar.Level    = stats.Level;
+            _statusBar.CharName = _myName;
+            _statusBar.JobName  = JobName(stats.JobId);
+            _statusBar.Hp       = stats.Hp;   _statusBar.MaxHp = stats.MaxHp;
+            _statusBar.Mp       = stats.Mp;   _statusBar.MaxMp = stats.MaxMp;
+            _statusBar.Exp      = stats.Exp;
+        }
+        if (_charInfo != null)
+        {
+            _charInfo.CharName = _myName;
+            _charInfo.Level    = stats.Level;
+            _charInfo.Job      = JobName(stats.JobId);
+        }
+        if (_skill != null) _skill.SP = stats.SP;
+    }
+
     // Prefer the StringPool job name; fall back to the built-in table for jobs
     // not yet mapped to a pool id (no regression).
     private string JobName(int jobId) =>
@@ -1938,10 +2066,18 @@ public sealed class GameStage : Stage
         {
             return;
         }
-        _attackCooldown = AttackCooldownSeconds;
+        // No swinging while on a ladder/rope.
+        if (_physics.Stance is Stance.Ladder or Stance.Rope)
+        {
+            return;
+        }
 
-        // Visible swing immediately (server echoes MobDamaged for the numbers).
-        _physics.TriggerAttack();
+        // Visible swing immediately (server echoes MobDamaged for the numbers). CharLook
+        // picks a weapon-appropriate action (swingO1/stabO1/…, or proneStab when prone)
+        // and plays it once; its full length paces the next swing so the animation
+        // completes before re-triggering on a held attack key.
+        var swingDuration = _player?.Attack(prone: _physics.Stance == Stance.Prone) ?? 0f;
+        _attackCooldown = swingDuration > 0f ? swingDuration : AttackCooldownSeconds;
         if (_sound?.GetItem("Weapon.img/swordL/Attack") is WzSound swing)
         {
             Game.AudioPlayer.PlayEffect(swing);
@@ -2025,25 +2161,4 @@ public sealed class GameStage : Stage
         _npcs.Add(npc);
     }
 
-    // Parses #L0#choice#l menu anchors from a script text, or falls back to newline-split.
-    private static IReadOnlyList<string> ParseMenuChoices(string text)
-    {
-        var results = new List<string>();
-        // Try #L<n>#...#l pattern first
-        var matches = System.Text.RegularExpressions.Regex.Matches(text, @"#L\d+#(.+?)#l");
-        if (matches.Count > 0)
-        {
-            foreach (System.Text.RegularExpressions.Match m in matches)
-                results.Add(m.Groups[1].Value.Trim());
-            return results;
-        }
-        // Fallback: newline-separated lines, stripping common format codes
-        foreach (var line in text.Split(new[] { "\r\n", "\n" }, StringSplitOptions.RemoveEmptyEntries))
-        {
-            var clean = System.Text.RegularExpressions.Regex.Replace(line, @"#[A-Za-z0-9]+#?", "").Trim();
-            if (!string.IsNullOrEmpty(clean))
-                results.Add(clean);
-        }
-        return results;
-    }
 }

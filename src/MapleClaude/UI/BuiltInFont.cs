@@ -33,17 +33,18 @@ public sealed class BuiltInFont : IDisposable
     public BuiltInFont(GraphicsDevice gd, string fontFamily = "Malgun Gothic", float emSize = 11f,
         System.Drawing.GraphicsUnit unit = System.Drawing.GraphicsUnit.Point,
         System.Drawing.Text.TextRenderingHint hint = System.Drawing.Text.TextRenderingHint.AntiAlias,
-        string? fallbackFamily = null)
+        string? fallbackFamily = null,
+        System.Drawing.FontStyle style = System.Drawing.FontStyle.Regular)
     {
         _gd = gd;
         _hint = hint;
-        _sysFont = new System.Drawing.Font(fontFamily, emSize, System.Drawing.FontStyle.Regular, unit);
+        _sysFont = new System.Drawing.Font(fontFamily, emSize, style, unit);
         // Optional fallback face for codepoints the primary font lacks (Tahoma has no Hangul, so typed
         // Korean falls back to Malgun Gothic). Only the lazy non-ASCII path consults it.
         if (!string.IsNullOrEmpty(fallbackFamily) &&
             !string.Equals(fallbackFamily, fontFamily, StringComparison.OrdinalIgnoreCase))
         {
-            try { _fallbackFont = new System.Drawing.Font(fallbackFamily, emSize, System.Drawing.FontStyle.Regular, unit); }
+            try { _fallbackFont = new System.Drawing.Font(fallbackFamily, emSize, style, unit); }
             catch { _fallbackFont = null; }
         }
         _stringFormat = System.Drawing.StringFormat.GenericTypographic;
