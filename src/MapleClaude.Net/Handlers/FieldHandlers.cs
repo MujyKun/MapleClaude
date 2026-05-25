@@ -734,18 +734,30 @@ public sealed class FieldHandlers
 
     private void HandleDropEnter(InPacket p)
     {
-        var enterType = p.ReadByte();
+        var enterType = p.ReadByte();   // DropEnterType: 0 JUST_SHOWING, 1 CREATE, 2 ON_THE_FOOTHOLD, 3 FADING_OUT
         var dropId    = p.ReadInt();
         var isMoney   = p.ReadBool();
         var info      = p.ReadInt();    // itemId or meso amount
         var ownerId   = p.ReadInt();
         p.ReadByte();    // ownType
-        var x = p.ReadShort();
+        var x = p.ReadShort();          // landing (resting) position
         var y = p.ReadShort();
+        p.ReadInt();     // sourceId (object id)
+        // Animated enter types carry the source position the drop is tossed from (mob/player); the parabolic
+        // toss runs from there to (x,y). ON_THE_FOOTHOLD (2) has no source — the drop just appears.
+        var animated = enterType != 2;
+        short sx = x, sy = y;
+        if (animated)
+        {
+            sx = p.ReadShort();
+            sy = p.ReadShort();
+            p.ReadShort();   // tDelay
+        }
         OnDropEnter?.Invoke(new DropEnterArgs
         {
             DropId = dropId, IsMoney = isMoney,
             ItemIdOrAmount = info, X = x, Y = y,
+            SourceX = sx, SourceY = sy, Animated = animated,
         });
     }
 
@@ -753,7 +765,9 @@ public sealed class FieldHandlers
     {
         var leaveType = p.ReadByte();
         var dropId    = p.ReadInt();
-        OnDropLeave?.Invoke(new DropLeaveArgs { DropId = dropId, LeaveType = leaveType });
+        var pickUpId  = 0;
+        if (leaveType is 2 or 3 or 5) pickUpId = p.ReadInt();   // picked up by user(2)/mob(3)/pet(5)
+        OnDropLeave?.Invoke(new DropLeaveArgs { DropId = dropId, LeaveType = leaveType, PickUpId = pickUpId });
     }
 
     // ── Inventory ─────────────────────────────────────────────────────────────
@@ -1468,10 +1482,12 @@ public sealed class DropEnterArgs
     public int   DropId;
     public bool  IsMoney;
     public int   ItemIdOrAmount;
-    public short X, Y;
+    public short X, Y;             // landing (resting) position
+    public short SourceX, SourceY; // where the drop is tossed from (parabolic arc origin)
+    public bool  Animated;         // false for ON_THE_FOOTHOLD (appears in place, no toss)
 }
 
-public sealed class DropLeaveArgs { public int DropId; public byte LeaveType; }
+public sealed class DropLeaveArgs { public int DropId; public byte LeaveType; public int PickUpId; }
 
 public sealed class GuildLoadArgs
 {

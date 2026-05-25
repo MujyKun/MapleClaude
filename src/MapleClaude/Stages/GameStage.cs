@@ -45,6 +45,7 @@ public sealed class GameStage : Stage
     // World
     private GameCamera _camera = null!;
     private CharLook? _player;
+    private AvatarLook? _myLook;   // the player's current look; mutated on equip/unequip to re-render the avatar
     private CharacterRenderer? _charRenderer;
     private readonly List<NpcLook> _npcs = new();
 
@@ -58,6 +59,7 @@ public sealed class GameStage : Stage
 
     // Drops
     private readonly Dictionary<int, DropSprite> _drops = new();
+    private ItemIconLoader? _iconLoader;   // shared item-icon loader (inventories, tooltips, ground drops)
 
     // Damage numbers
     private DamageNumber? _dmgNumbers;
@@ -92,6 +94,8 @@ public sealed class GameStage : Stage
     private NpcTalk? _npcTalk;
     private ScriptSubst? _npcSubst;
     private BuiltInFont? _dlgBody, _dlgBold, _dlgName;
+    private BuiltInFont? _tipFont;     // small (9px) font for item tooltips — Game.Font (~14.7px) is too big
+    private BuiltInFont? _tipTabFont;  // tiny (8px) font rendered natively for the job-requirement tabs
     private Shop? _shop;
     private Trunk? _trunk;
     private Messenger? _messengerWin;
@@ -209,6 +213,14 @@ public sealed class GameStage : Stage
             System.Drawing.Text.TextRenderingHint.AntiAlias, "Malgun Gothic", System.Drawing.FontStyle.Bold);
         _dlgName = new BuiltInFont(GraphicsDevice, "Arial", 11f, System.Drawing.GraphicsUnit.Pixel,
             System.Drawing.Text.TextRenderingHint.AntiAlias, "Malgun Gothic");
+        // Item tooltips render at a small 9px — the default UI font is Tahoma 11 *point* (~14.7px),
+        // which makes the whole card oversized/too wide.
+        _tipFont = new BuiltInFont(GraphicsDevice, "Tahoma", 9f, System.Drawing.GraphicsUnit.Pixel,
+            System.Drawing.Text.TextRenderingHint.AntiAlias, "Malgun Gothic");
+        // The job-requirement tabs are drawn with this rendered natively at 8px (crisp) rather than by
+        // scaling the 9px font down, which blurred glyphs and stretched the letter spacing.
+        _tipTabFont = new BuiltInFont(GraphicsDevice, "Tahoma", 8f, System.Drawing.GraphicsUnit.Pixel,
+            System.Drawing.Text.TextRenderingHint.AntiAlias, "Malgun Gothic");
         _npcSubst = new ScriptSubst
         {
             ItemName  = Game.Names.ItemName,
@@ -248,15 +260,28 @@ public sealed class GameStage : Stage
         _chatBar.Bar = _statusBar;   // chat aligns to the status bar's authentic chat-input rect
         _miniMap = new MiniMap(_loader, _ui, font, _logger) { IsVisible = true };
         _buffList = new BuffList(_loader, _ui, font) { IsVisible = true };
-        var iconLoader = new ItemIconLoader(_loader, _charWz, Game.ItemWz);
-        _equip = new EquipInventory(_loader, _ui, font, iconLoader, Game.Names.ItemDesc);
-        _item = new ItemInventory(_loader, _ui, font, iconLoader, Game.Names.ItemDesc);
+        var iconLoader = _iconLoader = new ItemIconLoader(_loader, _charWz, Game.ItemWz);
+        _equip = new EquipInventory(_loader, _ui, font, iconLoader, Game.Names.ItemDesc, _tipFont, _tipTabFont);
+        _item = new ItemInventory(_loader, _ui, font, iconLoader, Game.Names.ItemDesc, _tipFont, _tipTabFont);
         _item.OnItemActivate = OnInventoryItemActivate;
         // Drag an item to another slot in the same tab → rearrange (server-authoritative).
         _item.OnMoveItem = (tab, from, to) =>
         {
             if (Game.Session.IsConnected)
                 Game.Session.Send(GameSender.ChangeSlotPosition(TabToInvType(tab), (short)from, (short)to, 1));
+        };
+        // Drag an item outside the window → drop it on the ground (newPos = 0; server spawns the drop).
+        _item.OnDropToGround = (tab, slot) =>
+        {
+            if (!Game.Session.IsConnected) return;
+            var qty = (short)Math.Max(1, _item?.ItemAt(tab, slot)?.Quantity ?? 1);
+            Game.Session.Send(GameSender.ChangeSlotPosition(TabToInvType(tab), (short)slot, 0, qty));
+        };
+        // Drag a worn item outside both windows → drop it on the ground (from its negative body part).
+        _equip.OnDropToGround = bodyPart =>
+        {
+            if (Game.Session.IsConnected)
+                Game.Session.Send(GameSender.ChangeSlotPosition(InventoryType.Equip, (short)-bodyPart, 0, 1));
         };
         // Double-click a worn slot in the Equip window → unequip to the first free Equip-tab slot.
         _equip.OnUnequip = bodyPart =>
@@ -723,14 +748,24 @@ public sealed class GameStage : Stage
         };
 
         fh.OnDropEnter += args =>
-            _drops[args.DropId] = new DropSprite(args.DropId, args.IsMoney,
-                                                  args.ItemIdOrAmount,
-                                                  new Vector2(args.X, args.Y), Game.Font);
+            _drops[args.DropId] = new DropSprite(args.DropId, args.IsMoney, args.ItemIdOrAmount,
+                new Vector2(args.SourceX, args.SourceY), new Vector2(args.X, args.Y), args.Animated,
+                args.IsMoney ? null : _iconLoader?.LoadIcon(args.ItemIdOrAmount), Game.Font);
 
-        fh.OnDropLeave  += args => _drops.Remove(args.DropId);
+        fh.OnDropLeave  += args =>
+        {
+            // Picked up (user/mob/pet) → the item flies into the picker and fades (CDropPool absorb),
+            // then is removed when the animation finishes. Other leave types (expire/explode) remove now.
+            if (args.LeaveType is 2 or 3 or 5 && _drops.TryGetValue(args.DropId, out var d))
+                // Live target: re-read the player's chest each frame so the item homes to the moving body.
+                d.StartAbsorb(() => (_physics?.Position ?? _player?.Position ?? Vector2.Zero) - new Vector2(0, 28));
+            else
+                _drops.Remove(args.DropId);
+        };
 
         fh.OnInventoryOperation += ops =>
         {
+            var lookDirty = false;   // an equipped slot changed → rebuild the rendered avatar once at the end
             foreach (var op in ops)
             {
                 var tab = InvTypeToTab(op.InvType);
@@ -741,6 +776,7 @@ public sealed class GameStage : Stage
                         if (op.InvType == InventoryType.Equipped)
                         {
                             _equip?.SetEquipped(op.Pos, op.Item.ItemId, ItemDisplayName(op.Item));
+                            if (_myLook != null) { _myLook.HairEquip[op.Pos] = op.Item.ItemId; lookDirty = true; }
                         }
                         else if (tab >= 0)
                         {
@@ -762,6 +798,7 @@ public sealed class GameStage : Stage
                             {
                                 _equip?.SetEquipped(-op.NewPos, moved.Id, moved.Name);
                                 _item?.RemoveSlot(0, op.Pos);
+                                if (_myLook != null) { _myLook.HairEquip[-op.NewPos] = moved.Id; lookDirty = true; }
                             }
                         }
                         else if (op.Pos < 0)
@@ -776,17 +813,31 @@ public sealed class GameStage : Stage
                                         new ItemInventory.InvItem { Id = uid, Name = uname, Quantity = 1 });
                                 }
                             }
+                            if (_myLook != null && _myLook.HairEquip.Remove(-op.Pos)) lookDirty = true;
                         }
                         else if (tab >= 0)
                         {
                             _item?.MoveSlot(tab, op.Pos, op.NewPos);
                         }
                         break;
-                    case 3: // DelItem
-                        if (op.InvType == InventoryType.Equipped) _equip?.RemoveEquipped(op.Pos);
-                        else if (tab >= 0)                        _item?.RemoveSlot(tab, op.Pos);
+                    case 3: // DelItem. A negative position is a worn slot (e.g. an equipped item dropped to
+                            // the ground → the server sends delItem(Equip, -bodyPart)); fold it onto the equip
+                            // window + avatar, not the item grid.
+                        if (op.InvType == InventoryType.Equipped || op.Pos < 0)
+                        {
+                            var part = op.Pos < 0 ? -op.Pos : op.Pos;
+                            _equip?.RemoveEquipped(part);
+                            if (_myLook != null && _myLook.HairEquip.Remove(part)) lookDirty = true;
+                        }
+                        else if (tab >= 0) _item?.RemoveSlot(tab, op.Pos);
                         break;
                 }
+            }
+            // Re-apply the mutated look so the worn avatar (and the profile) re-render with the change.
+            if (lookDirty && _myLook != null && _player != null && _charRenderer != null)
+            {
+                _player.SetAvatar(_charRenderer, _myLook);
+                _charInfo?.SetAvatar(_charRenderer, _myLook);
             }
         };
 
@@ -972,6 +1023,8 @@ public sealed class GameStage : Stage
         _dlgBody?.Dispose(); _dlgBody = null;
         _dlgBold?.Dispose(); _dlgBold = null;
         _dlgName?.Dispose(); _dlgName = null;
+        _tipFont?.Dispose(); _tipFont = null;
+        _tipTabFont?.Dispose(); _tipTabFont = null;
         base.OnExit();
     }
 
@@ -1011,6 +1064,7 @@ public sealed class GameStage : Stage
             PushCharStats(_charStats);
             if (args.Look is not null && _player is not null && _charRenderer is not null)
             {
+                _myLook = args.Look;
                 _player.SetAvatar(_charRenderer, args.Look);
                 _charInfo?.SetAvatar(_charRenderer, args.Look);   // profile shows the real avatar
             }
@@ -1439,6 +1493,10 @@ public sealed class GameStage : Stage
         Game.Session.DrainQueue();   // dispatch all queued server packets on game thread
         var dt = (float)gameTime.ElapsedGameTime.TotalSeconds;
 
+        // Cursor shows the closed-hand "grab" sprite while an item (item- or equip-inventory) is held.
+        if (Game.Cursor != null)
+            Game.Cursor.ItemGrabbed = _item?.IsDragging == true || _equip?.IsDragging == true;
+
         // Read held keys each frame (movement is frame-continuous).
         // Movement is driven by the live KeyConfig bindings so user rebinds
         // (rebound MoveLeft/MoveRight/Jump in the in-game F12 dialog) take
@@ -1488,10 +1546,11 @@ public sealed class GameStage : Stage
             }
             else
             {
-                // Root a grounded melee swing: no walking while the swing animation plays,
-                // otherwise the avatar slides across the ground. Airborne keeps its drift so
-                // jump-attacks still arc; climbing is unaffected.
-                var rooted = _attackCooldown > 0f && _physics.Grounded;
+                // Root horizontal input while a melee swing plays: grounded, this stops the avatar from
+                // sliding; airborne, it stops you steering mid-jump (you can't change direction while
+                // attacking). The existing jump momentum is preserved (no input ≠ deceleration in the air),
+                // so a jump-attack still arcs along the trajectory it was launched on; climbing is unaffected.
+                var rooted = _attackCooldown > 0f;
                 var input = new PlayerInput
                 {
                     Left = _moveLeft && !rooted,
@@ -1584,6 +1643,10 @@ public sealed class GameStage : Stage
 
         // Drops
         foreach (var drop in _drops.Values) drop.Update(dt);
+        // Reap drops whose pick-up absorb animation finished.
+        List<int>? doneDrops = null;
+        foreach (var (id, d) in _drops) if (d.Finished) (doneDrops ??= new()).Add(id);
+        if (doneDrops != null) foreach (var id in doneDrops) _drops.Remove(id);
 
         // Other players
         foreach (var other in _otherChars.Values) other.Update(dt);
@@ -1722,6 +1785,20 @@ public sealed class GameStage : Stage
         if (button != MouseButton.Left) return;
         if (_quitConfirm?.IsVisible == true) { _quitConfirm.HandleMouseButton(x, y, down); return; }
         if (_gameMenu?.IsVisible == true) { _gameMenu.HandleMouseButton(x, y, down); return; }
+        // A held item dropped outside its own window → drop it to the ground (drops inside the window —
+        // slot moves, equips, cancels — are resolved by the window's own HandleMouseButton below).
+        if (down && _item?.IsDragging == true && !_item.ContainsPoint(x, y))
+        {
+            _item.DropHeldToGround();
+            return;
+        }
+        // While a worn equip is held on the cursor, the next click resolves the drop: onto the item
+        // inventory (or a fast click back on its slot) → unequip; outside both → drop to ground; else put back.
+        if (down && _equip?.IsDragging == true)
+        {
+            _equip.ResolveDrop(x, y, _item?.ContainsPoint(x, y) == true);
+            return;
+        }
         for (var i = _panels.Count - 1; i >= 0; i--)
         {
             var p = _panels[i];

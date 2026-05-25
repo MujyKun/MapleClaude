@@ -34,6 +34,10 @@ public sealed class MapleCursor
 
     public CursorState State { get; private set; } = CursorState.Default;
 
+    /// <summary>When true the cursor shows the closed-hand "grab" sprite (variant 12) regardless of
+    /// hover/click state — set while an inventory item is picked up onto the cursor (ghost-drag).</summary>
+    public bool ItemGrabbed { get; set; }
+
     public MapleCursor(ILogger logger, WzTextureLoader loader)
     {
         _logger = logger;
@@ -109,14 +113,16 @@ public sealed class MapleCursor
 
     public void Draw(SpriteBatch sb)
     {
-        WzSprite? sprite = State switch
-        {
-            CursorState.Click => _click ?? _default,
-            CursorState.Hover => _hoverFrames.Count > 0
-                ? _hoverFrames[_hoverFrameIndex].Sprite
-                : _default,
-            _ => _default,
-        };
+        WzSprite? sprite = ItemGrabbed
+            ? _click ?? _default
+            : State switch
+            {
+                CursorState.Click => _click ?? _default,
+                CursorState.Hover => _hoverFrames.Count > 0
+                    ? _hoverFrames[_hoverFrameIndex].Sprite
+                    : _default,
+                _ => _default,
+            };
         if (sprite is null)
         {
             return;
