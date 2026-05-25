@@ -598,6 +598,11 @@ execution) stay server-side; the client only parses/forwards them.
 
 ## Phase 30 — Portal rendering
 
+**Status.** Shipped for the native-visible portal path. UAT confirmed walking
+into visible map-to-map portals changes maps live without restart; non-migrate
+`SetField` reloads the destination field and movement CRCs follow the new map.
+Hidden/script reveal states remain deferred below.
+
 **Scope.** Portals are parsed into `FieldScene._portals` and already drive warp
 logic (Phase 10: walk on + Up → `UserTransferFieldRequest`), but they are **never
 drawn**. Render the animated in-game portal sprites from

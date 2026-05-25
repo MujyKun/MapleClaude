@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Linq;
 using MapleClaude.Character;
+using MapleClaude.Domain;
 using MapleClaude.Render;
 using MapleClaude.Wz;
 using Microsoft.Extensions.Logging;
@@ -28,6 +29,7 @@ public sealed class FieldScene
     private MapInfo _info = new();
     private Rectangle _bounds = new(-3000, -2000, 6000, 4000);
     private MiniMapData? _miniMap;
+    private AnimatedSprite? _visiblePortal;
 
     // Render data (loaded once per map, drawn every frame against the camera).
     private readonly List<BackDraw> _backs = new();
@@ -108,6 +110,7 @@ public sealed class FieldScene
         AssignZMass();
         ComputeBounds();
         LoadPortals(root);
+        LoadPortalVisuals();
         LoadLadderRope(root);
         try
         {
@@ -122,8 +125,8 @@ public sealed class FieldScene
         var tiles = _tileLayers.Sum(l => l.Count);
         var objs = _objLayers.Sum(l => l.Count);
         _logger.LogInformation(
-            "FieldScene: map={Id} footholds={Fh} portals={P} backs={B} tiles={T} objs={O}",
-            mapId, _footholds.Count, _portals.Count, _backs.Count + _fronts.Count, tiles, objs);
+            "FieldScene: map={Id} crc=0x{Crc:X8} footholds={Fh} portals={P} backs={B} tiles={T} objs={O}",
+            mapId, Crc, _footholds.Count, _portals.Count, _backs.Count + _fronts.Count, tiles, objs);
     }
 
     private void LoadInfo(WzProperty root)
@@ -259,6 +262,20 @@ public sealed class FieldScene
         }
     }
 
+    private void LoadPortalVisuals()
+    {
+        // v95 visible portals are the repeating "pv" animation under
+        // MapHelper.img/portal/game. Hidden/script portals need state signals and
+        // stay deferred; draw only normally visible game portals for this pass.
+        var visual = PortalVisual.ForType(2);
+        var portalPath = visual is null ? string.Empty : $"MapHelper.img/portal/game/{visual.AnimationPath}";
+        _visiblePortal = _loader.LoadAnimation(_mapWz.GetItem(portalPath));
+        if (_visiblePortal is null && _portals.Values.Any(p => p.DrawsVisibleGamePortal))
+        {
+            _logger.LogWarning("Visible portal animation MapHelper.img/portal/game/pv was not found or could not be decoded");
+        }
+    }
+
     private void LoadLadderRope(WzProperty root)
     {
         if (root.Get("ladderRope") is not WzProperty lrRoot)
@@ -350,6 +367,7 @@ public sealed class FieldScene
     {
         foreach (var b in _backs) UpdateBack(b, dtMs);
         foreach (var b in _fronts) UpdateBack(b, dtMs);
+        _visiblePortal?.Update(dtMs);
         foreach (var layer in _objLayers)
         {
             foreach (var o in layer) o.Sprite?.Update(dtMs);
@@ -389,6 +407,8 @@ public sealed class FieldScene
             }
         }
 
+        DrawPortals(sb, whitePixel, center);
+
         foreach (var b in _fronts) DrawBackground(sb, b, center, screenWidth, screenHeight);
 
         // Debug foothold overlay (MAPLECLAUDE_DEBUG): floors green, walls red; blue channel encodes the WZ
@@ -402,6 +422,39 @@ public sealed class FieldScene
                 var blue = (byte)Math.Min(255, fh.Layer * 60);   // layer 0→0, 2→120, 4→240
                 var col = fh.IsWall ? new Color((byte)255, (byte)70, blue) : new Color((byte)70, (byte)220, blue);
                 DrawDebugLine(sb, whitePixel, p1, p2, col, 2f);
+            }
+        }
+    }
+
+    private void DrawPortals(SpriteBatch sb, Texture2D whitePixel, Vector2 center)
+    {
+        foreach (var portal in _portals.Values)
+        {
+            if (!portal.DrawsVisibleGamePortal)
+            {
+                continue;
+            }
+
+            var screen = WorldToScreen(portal.X, portal.Y, center);
+            if (_visiblePortal is not null)
+            {
+                _visiblePortal.Draw(sb, screen);
+            }
+            if (Debug.DebugLauncher.IsEnabled)
+            {
+                if (_visiblePortal is null)
+                {
+                    // Debug-only fallback: if WZ decoding failed, show a tiny
+                    // marker so UAT can locate a visible portal. Release-style
+                    // rendering stays native-looking by drawing nothing without
+                    // the MapHelper animation.
+                    DrawDebugLine(sb, whitePixel, screen + new Vector2(-8, 0), screen + new Vector2(8, 0), Color.Magenta, 2f);
+                    DrawDebugLine(sb, whitePixel, screen + new Vector2(0, -12), screen + new Vector2(0, 4), Color.Magenta, 2f);
+                }
+
+                var c = portal.HasFieldTarget ? Color.Cyan : Color.OrangeRed;
+                DrawDebugLine(sb, whitePixel, screen + new Vector2(-40, 0), screen + new Vector2(40, 0), c, 1f);
+                DrawDebugLine(sb, whitePixel, screen + new Vector2(0, -40), screen + new Vector2(0, 40), c, 1f);
             }
         }
     }

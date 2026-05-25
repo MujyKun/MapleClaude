@@ -116,6 +116,9 @@ public sealed class GameStage : Stage
     private FieldScene? _field;
     private PlayerController? _physics;
     private byte _fieldKey;
+    private int _currentMapId;
+    private int _moveCrcLogCount;
+    private bool _portalTransferPending;
     private string _currentBgm = string.Empty;
     private string _mapStreet = string.Empty;
     private string _mapNameText = string.Empty;
@@ -975,34 +978,42 @@ public sealed class GameStage : Stage
     private void OnSetField(SetFieldArgs args)
     {
         _fieldKey = args.FieldKey;
-        if (args.Stat is null || _map is null)
+        var mapId = args.Stat?.PosMap ?? args.PosMap;
+        var portal = args.Stat?.Portal ?? args.Portal;
+        _currentMapId = mapId;
+        _moveCrcLogCount = 0;
+        _portalTransferPending = false;
+        if (mapId <= 0 || _map is null)
         {
             return;
         }
-        Game.CharacterId = args.Stat.CharacterId;
-        // SetField's CharacterStat is the authoritative name source (StatChanged may not carry it).
-        if (!string.IsNullOrEmpty(args.Stat.Name))
+        if (args.Stat is not null)
         {
-            _myName = args.Stat.Name;
-            if (_statusBar != null) _statusBar.CharName = _myName;
-        }
-        // Seed the stat snapshot from SetField's CharacterStat so the Stat / Character-info windows
-        // show the real name + stats immediately (StatChanged arrives later and never carries the
-        // name — that's why the Stat window's name row was blank). Guild comes from a separate
-        // packet, so preserve any value already learned.
-        var seed = args.Stat;
-        _charStats = new CharStats
-        {
-            Name  = seed.Name, Level = seed.Level, JobId = seed.Job,
-            Str = seed.Str, Dex = seed.Dex, Int = seed.Int, Luk = seed.Luk,
-            Hp = seed.Hp, MaxHp = seed.MaxHp, Mp = seed.Mp, MaxMp = seed.MaxMp,
-            Exp = seed.Exp, AP = seed.Ap, Fame = seed.Pop, Guild = _charStats.Guild,
-        };
-        PushCharStats(_charStats);
-        if (args.Look is not null && _player is not null && _charRenderer is not null)
-        {
-            _player.SetAvatar(_charRenderer, args.Look);
-            _charInfo?.SetAvatar(_charRenderer, args.Look);   // profile shows the real avatar
+            Game.CharacterId = args.Stat.CharacterId;
+            // SetField's CharacterStat is the authoritative name source (StatChanged may not carry it).
+            if (!string.IsNullOrEmpty(args.Stat.Name))
+            {
+                _myName = args.Stat.Name;
+                if (_statusBar != null) _statusBar.CharName = _myName;
+            }
+            // Seed the stat snapshot from SetField's CharacterStat so the Stat / Character-info windows
+            // show the real name + stats immediately (StatChanged arrives later and never carries the
+            // name — that's why the Stat window's name row was blank). Guild comes from a separate
+            // packet, so preserve any value already learned.
+            var seed = args.Stat;
+            _charStats = new CharStats
+            {
+                Name  = seed.Name, Level = seed.Level, JobId = seed.Job,
+                Str = seed.Str, Dex = seed.Dex, Int = seed.Int, Luk = seed.Luk,
+                Hp = seed.Hp, MaxHp = seed.MaxHp, Mp = seed.Mp, MaxMp = seed.MaxMp,
+                Exp = seed.Exp, AP = seed.Ap, Fame = seed.Pop, Guild = _charStats.Guild,
+            };
+            PushCharStats(_charStats);
+            if (args.Look is not null && _player is not null && _charRenderer is not null)
+            {
+                _player.SetAvatar(_charRenderer, args.Look);
+                _charInfo?.SetAvatar(_charRenderer, args.Look);   // profile shows the real avatar
+            }
         }
         // Ask the server for our guild roster once (it isn't pushed on login).
         if (!_guildLoadSent && Game.Session.IsConnected)
@@ -1022,9 +1033,9 @@ public sealed class GameStage : Stage
             _drops.Clear();
 
             _field = new FieldScene(_loggerFactory.CreateLogger<FieldScene>(), _map, _loader!);
-            _field.Load(args.Stat.PosMap);
+            _field.Load(mapId);
             _physics = new PlayerController(_field);
-            _field.PlacePlayerAtPortal(_physics, args.Stat.Portal);
+            _field.PlacePlayerAtPortal(_physics, portal);
             // Re-position archlo's CharLook to the spawn point.
             if (_player != null)
             {
@@ -1034,21 +1045,22 @@ public sealed class GameStage : Stage
             _camera.MapBounds = _field.Bounds;   // VR rect when present, else the foothold AABB (shared with physics)
             PopulateInventory(args);
             PopulateQuests(args);
-            UpdateMapName(args.Stat.PosMap);
+            UpdateMapName(mapId);
             _miniMap?.SetField(_field.MiniMap, _mapStreet, _mapNameText);
             PlayMapBgm(_field.Info.Bgm);
-            _logger.LogInformation("SetField processed — mapId={Map} portal={Portal} money={Money}",
-                args.Stat.PosMap, args.Stat.Portal, args.Money);
+            _logger.LogInformation("SetField processed — mapId={Map} portal={Portal} fieldKey={FieldKey} crc=0x{Crc:X8} money={Money} migrate={Migrate}",
+                mapId, portal, _fieldKey, _field.Crc, args.Money, args.IsMigrate);
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Failed to load field {Id}", args.Stat.PosMap);
+            _logger.LogError(ex, "Failed to load field {Id}", mapId);
         }
     }
 
     // Walk-into-portal travel: if the player stands on a warp portal (one with a
-    // real target map), send UserTransferFieldRequest. The server replies with a
-    // fresh SetField for the destination map.
+    // real target map), send UserTransferFieldRequest. Kinoko validates the
+    // source-map portal by name, then resolves that portal's destination; the
+    // server replies with a fresh SetField for the destination map.
     private const float PortalEnterRange = 40f;
 
     private bool TryEnterPortal()
@@ -1057,13 +1069,19 @@ public sealed class GameStage : Stage
         var pos = _physics.Position;
         foreach (var portal in _field.Portals.Values)
         {
-            if (portal.TargetMap <= 0 || portal.TargetMap == 999_999_999) continue;
+            if (!portal.HasFieldTarget) continue;
             if (Vector2.Distance(pos, portal.Position) > PortalEnterRange) continue;
+            _portalTransferPending = true;
             Game.Session.Send(GameSender.TransferField(
-                _fieldKey, portal.TargetMap, portal.TargetPortal, (short)pos.X, (short)pos.Y));
-            _logger.LogInformation("Portal '{Name}' → map {Map} (portal {Tp})",
+                _fieldKey, portal.TargetMap, portal.Name, (short)pos.X, (short)pos.Y));
+            _logger.LogInformation("Portal '{Name}' → map {Map} (target portal {Tp})",
                 portal.Name, portal.TargetMap, portal.TargetPortal);
             return true;
+        }
+        if (Debug.DebugLauncher.IsEnabled)
+        {
+            _logger.LogDebug("Portal enter requested at ({X},{Y}) but no target portal was within {Range}px",
+                (int)pos.X, (int)pos.Y, (int)PortalEnterRange);
         }
         return false;
     }
@@ -1396,13 +1414,20 @@ public sealed class GameStage : Stage
     private void SendUserMove(byte[] movePathBlob)
     {
         // UserMove(44): int 0; int 0; byte fieldKey; int 0; int 0; int crc; int crc32; <MovePath blob>.
+        var crc = _field?.Crc ?? 0;
+        if (_moveCrcLogCount < 3 || crc == 0)
+        {
+            _logger.LogInformation("UserMove(44) send — mapId={Map} fieldKey={FieldKey} crc=0x{Crc:X8} movePathLen={Len}",
+                _currentMapId, _fieldKey, crc, movePathBlob.Length);
+            _moveCrcLogCount++;
+        }
         var p = OutPacket.Of(InHeader.UserMove);
         p.WriteInt(0);
         p.WriteInt(0);
         p.WriteByte(_fieldKey);
         p.WriteInt(0);
         p.WriteInt(0);
-        p.WriteInt(_field?.Crc ?? 0);   // dwCrc — must match field.getFieldCrc() or the server logs a CRC mismatch
+        p.WriteInt(crc);                // dwCrc — must match field.getFieldCrc() or the server logs a CRC mismatch
         p.WriteInt(0);                  // 0
         p.WriteInt(0);                  // Crc32 (server reads it but does not validate)
         p.WriteBytes(movePathBlob);
@@ -1450,30 +1475,44 @@ public sealed class GameStage : Stage
 
         if (_physics != null)
         {
-            // Root a grounded melee swing: no walking while the swing animation plays,
-            // otherwise the avatar slides across the ground. Airborne keeps its drift so
-            // jump-attacks still arc; climbing is unaffected.
-            var rooted = _attackCooldown > 0f && _physics.Grounded;
-            var input = new PlayerInput
+            if (_portalTransferPending)
             {
-                Left = _moveLeft && !rooted,
-                Right = _moveRight && !rooted,
-                Up = _upPressed,
-                Down = _downPressed,
-                JumpPressed = _jumpPressed,
-            };
-            _physics.Update(input, dt);
-            _charRenderer?.Update(dt);   // advance the face-blink clock
-            if (_player != null)
-            {
-                _player.Position = _physics.Position;
-                _player.UpdateFromPhysics(dt, _physics.Stance, _physics.FacingLeft, _physics.ClimbMoving);
+                // Once the server accepts a portal request it may move the user to
+                // the destination field before the client's SetField has arrived.
+                // Native clients stop normal local movement during that transition;
+                // continuing to flush the source-map MovePath would send the old
+                // field CRC while Kinoko already validates against the destination
+                // field, producing transient "mismatching CRC" warnings.
+                _charRenderer?.Update(dt);
+                _camera.Target = _physics.Position;
             }
-            _camera.Target = _physics.Position;
-
-            if (_physics.TryFlushMovePath(out var blob))
+            else
             {
-                SendUserMove(blob);
+                // Root a grounded melee swing: no walking while the swing animation plays,
+                // otherwise the avatar slides across the ground. Airborne keeps its drift so
+                // jump-attacks still arc; climbing is unaffected.
+                var rooted = _attackCooldown > 0f && _physics.Grounded;
+                var input = new PlayerInput
+                {
+                    Left = _moveLeft && !rooted,
+                    Right = _moveRight && !rooted,
+                    Up = _upPressed,
+                    Down = _downPressed,
+                    JumpPressed = _jumpPressed,
+                };
+                _physics.Update(input, dt);
+                _charRenderer?.Update(dt);   // advance the face-blink clock
+                if (_player != null)
+                {
+                    _player.Position = _physics.Position;
+                    _player.UpdateFromPhysics(dt, _physics.Stance, _physics.FacingLeft, _physics.ClimbMoving);
+                }
+                _camera.Target = _physics.Position;
+
+                if (_physics.TryFlushMovePath(out var blob))
+                {
+                    SendUserMove(blob);
+                }
             }
         }
         else if (_player != null)

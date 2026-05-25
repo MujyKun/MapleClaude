@@ -54,11 +54,11 @@ public class TravelMigrationTests
     public void TransferField_WithPortal_EncodesPositionBlock()
     {
         var p = new InPacket(GameSender.TransferField(
-            fieldKey: 2, targetMap: 100000000, portal: "west00", x: 250, y: -120).ToArray());
+            fieldKey: 2, targetMap: 100000000, sourcePortal: "west00", x: 250, y: -120).ToArray());
         p.ReadShort().Should().Be((short)InHeader.UserTransferFieldRequest);
         p.ReadByte().Should().Be(2);            // fieldKey
         p.ReadInt().Should().Be(100000000);     // targetMap
-        p.ReadString().Should().Be("west00");   // destination portal
+        p.ReadString().Should().Be("west00");   // current-field portal name
         p.ReadShort().Should().Be(250);         // x
         p.ReadShort().Should().Be(-120);        // y
         p.ReadByte().Should().Be(0);            // unused
@@ -71,7 +71,7 @@ public class TravelMigrationTests
     public void TransferField_EmptyPortal_OmitsPositionBlock()
     {
         var p = new InPacket(GameSender.TransferField(
-            fieldKey: 1, targetMap: 200000000, portal: "", x: 5, y: 6).ToArray());
+            fieldKey: 1, targetMap: 200000000, sourcePortal: "", x: 5, y: 6).ToArray());
         p.ReadShort().Should().Be((short)InHeader.UserTransferFieldRequest);
         p.ReadByte().Should().Be(1);
         p.ReadInt().Should().Be(200000000);

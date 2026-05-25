@@ -154,16 +154,19 @@ public static class GameSender
         return p;
     }
 
-    // UserTransferFieldRequest(41): byte fieldKey, int targetMap, string portal,
+    // UserTransferFieldRequest(41): byte fieldKey, int targetMap, string sourcePortal,
     // [short x, short y if portal != ""], byte 0, byte premium, byte chase.
-    // Mirrors MigrationHandler.handleUserTransferFieldRequest.
-    public static OutPacket TransferField(byte fieldKey, int targetMap, string portal, short x, short y)
+    // Kinoko's MigrationHandler.handleUserTransferFieldRequest resolves
+    // sourcePortal against the current field and ignores targetMap for normal
+    // non-empty portal transfers; targetMap is still encoded to mirror the
+    // client packet layout.
+    public static OutPacket TransferField(byte fieldKey, int targetMap, string sourcePortal, short x, short y)
     {
         var p = OutPacket.Of(InHeader.UserTransferFieldRequest);
         p.WriteByte(fieldKey);
         p.WriteInt(targetMap);               // dwTargetField
-        p.WriteString(portal);               // sPortal (destination portal name)
-        if (!string.IsNullOrEmpty(portal))
+        p.WriteString(sourcePortal);         // sPortal (current-field portal name)
+        if (!string.IsNullOrEmpty(sourcePortal))
         {
             p.WriteShort(x);                 // GetPos()->x
             p.WriteShort(y);                 // GetPos()->y
