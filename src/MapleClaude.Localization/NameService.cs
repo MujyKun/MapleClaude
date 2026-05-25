@@ -27,6 +27,7 @@ public sealed class NameService
     private readonly ILogger? _logger;
 
     private Dictionary<int, string>? _items;
+    private Dictionary<int, string>? _itemDescs;
     private Dictionary<int, string>? _quests;
     private Dictionary<int, string>? _maps;
     private Dictionary<int, string>? _mobs;
@@ -42,6 +43,8 @@ public sealed class NameService
     }
 
     public string? ItemName(int id)  => Items().GetValueOrDefault(id);
+    /// <summary>The item's flavour-text description (String.wz <c>…/&lt;id&gt;/desc</c>), or null.</summary>
+    public string? ItemDesc(int id)  => ItemDescs().GetValueOrDefault(id);
     public string? SkillName(int id) => Skills().GetValueOrDefault(id);
     public string? MapName(int id)   => Maps().GetValueOrDefault(id);
     public string? MobName(int id)   => Mobs().GetValueOrDefault(id);
@@ -50,7 +53,8 @@ public sealed class NameService
 
     // ── Lazy category loaders ───────────────────────────────────────────────────
 
-    private Dictionary<int, string> Items()  => _items  ??= LoadItems();
+    private Dictionary<int, string> Items()     => _items     ??= LoadItemStrings("name");
+    private Dictionary<int, string> ItemDescs() => _itemDescs ??= LoadItemStrings("desc");
     private Dictionary<int, string> Maps()   => _maps   ??= LoadMaps();
     private Dictionary<int, string> Mobs()   => _mobs   ??= LoadFlatImage("Mob.img");
     private Dictionary<int, string> Npcs()   => _npcs   ??= LoadNpcs();
@@ -74,33 +78,32 @@ public sealed class NameService
         return dict;
     }
 
-    private Dictionary<int, string> LoadItems()
+    // Loads either the item names (fieldKey "name") or descriptions (fieldKey "desc"). Same WZ layout:
+    // Eqp.img/Eqp/<Type>/<id>/<field>, Etc.img/Etc/<id>/<field>, and flat Consume/Ins/Cash/Pet images.
+    private Dictionary<int, string> LoadItemStrings(string fieldKey)
     {
         var dict = new Dictionary<int, string>();
         var wz = _stringWz();
         if (wz is null) return dict;
         try
         {
-            // Eqp.img/Eqp/<Type>/<id>/name
             if (wz.GetItem("Eqp.img/Eqp") is WzProperty eqp)
             {
                 foreach (var type in EquipTypes)
                 {
-                    if (eqp.Get(type) is WzProperty list) AddNames(list, dict);
+                    if (eqp.Get(type) is WzProperty list) AddNames(list, dict, fieldKey);
                 }
             }
-            // Etc.img/Etc/<id>/name
-            if (wz.GetItem("Etc.img/Etc") is WzProperty etc) AddNames(etc, dict);
-            // Flat <img>/<id>/name images
+            if (wz.GetItem("Etc.img/Etc") is WzProperty etc) AddNames(etc, dict, fieldKey);
             foreach (var img in new[] { "Consume.img", "Ins.img", "Cash.img", "Pet.img" })
             {
-                if (wz.GetItem(img) is WzImage image) AddNames(image.Root, dict);
+                if (wz.GetItem(img) is WzImage image) AddNames(image.Root, dict, fieldKey);
             }
-            _logger?.LogInformation("NameService: loaded {Count} item names", dict.Count);
+            _logger?.LogInformation("NameService: loaded {Count} item {Field} strings", dict.Count, fieldKey);
         }
         catch (Exception ex)
         {
-            _logger?.LogWarning(ex, "NameService: failed loading item names");
+            _logger?.LogWarning(ex, "NameService: failed loading item {Field} strings", fieldKey);
         }
         return dict;
     }

@@ -246,8 +246,8 @@ public sealed class GameStage : Stage
         _miniMap = new MiniMap(_loader, _ui, font, _logger) { IsVisible = true };
         _buffList = new BuffList(_loader, _ui, font) { IsVisible = true };
         var iconLoader = new ItemIconLoader(_loader, _charWz, Game.ItemWz);
-        _equip = new EquipInventory(_loader, _ui, font, iconLoader);
-        _item = new ItemInventory(_loader, _ui, font, iconLoader);
+        _equip = new EquipInventory(_loader, _ui, font, iconLoader, Game.Names.ItemDesc);
+        _item = new ItemInventory(_loader, _ui, font, iconLoader, Game.Names.ItemDesc);
         _item.OnItemActivate = OnInventoryItemActivate;
         // Drag an item to another slot in the same tab → rearrange (server-authoritative).
         _item.OnMoveItem = (tab, from, to) =>
@@ -1425,7 +1425,10 @@ public sealed class GameStage : Stage
         _jumpPressed = _keyConfig!.IsActionDown(kb, KeyConfig.KeyAction.Jump) || imeJump;
         _downPressed = kb.IsKeyDown(Keys.Down);   // prone when grounded + idle
         _upPressed = kb.IsKeyDown(Keys.Up);       // grab + climb ladders / ropes
-        if (TextField.Active != null)             // typing in chat → the keyboard drives text, not the avatar
+        // Typing in chat → the keyboard drives text, not the avatar. Also suppress all input when the
+        // window isn't focused: the right-modifier check uses Win32 GetAsyncKeyState (focus-agnostic),
+        // so without this an alt-tabbed R-Ctrl/R-Alt would still move/attack.
+        if (TextField.Active != null || !Game.IsActive)
         {
             _moveLeft = _moveRight = _jumpPressed = _downPressed = _upPressed = false;
         }
@@ -1438,7 +1441,8 @@ public sealed class GameStage : Stage
             _attackCooldown -= dt;
         }
         // Held-key auto-repeat: holding the attack key re-swings once the per-attack delay has elapsed.
-        if (_physics != null && _attackCooldown <= 0f && TextField.Active == null
+        // Game.IsActive gates the GetAsyncKeyState right-modifier check (R-Ctrl attack) to the focused window.
+        if (_physics != null && _attackCooldown <= 0f && TextField.Active == null && Game.IsActive
             && _keyConfig!.IsActionDown(kb, KeyConfig.KeyAction.Attack))
         {
             DoMeleeAttack();
@@ -1908,6 +1912,21 @@ public sealed class GameStage : Stage
             return;
         }
 
+        if (line.StartsWith("/help", StringComparison.OrdinalIgnoreCase) ||
+            line.StartsWith("/commands", StringComparison.OrdinalIgnoreCase))
+        {
+            var hdr = new Color(255, 220, 120);
+            var c   = new Color(180, 200, 230);
+            _chatBar?.AddLine("Available commands:", hdr);
+            _chatBar?.AddLine("/w (/whisper) <name> <msg> — whisper a player", c);
+            _chatBar?.AddLine("/p party · /b buddy · /g guild · /a alliance — group chat", c);
+            _chatBar?.AddLine("/invite <name>, /accept, /create, /leave — party", c);
+            _chatBar?.AddLine("/messenger, /minvite <name>, /maccept, /mleave, /m <msg> — messenger", c);
+            _chatBar?.AddLine("/family — open the family window", c);
+            _chatBar?.AddLine("/help, /commands — show this list", c);
+            return;
+        }
+
         // Plain map chat.
         SendIfConnected(GameSender.UserChat(line));
     }
@@ -2036,6 +2055,7 @@ public sealed class GameStage : Stage
             case KeyConfig.KeyAction.WorldMap:       _worldMap!.IsVisible      = !_worldMap.IsVisible;       break;
             case KeyConfig.KeyAction.KeyBindings:    _keyConfig!.IsVisible     = !_keyConfig.IsVisible;      break;
             case KeyConfig.KeyAction.CharInfo:       _charInfo!.IsVisible      = !_charInfo.IsVisible;       break;
+            case KeyConfig.KeyAction.Family:         _familyWindow!.IsVisible  = !_familyWindow.IsVisible;   break;
             case KeyConfig.KeyAction.ChangeChannel:  _channelSelect!.IsVisible = !_channelSelect.IsVisible;  break;
             case KeyConfig.KeyAction.Menu:           _optionMenu!.IsVisible    = !_optionMenu.IsVisible;     break;
             case KeyConfig.KeyAction.MainMenu:       _optionMenu!.IsVisible    = !_optionMenu.IsVisible;     break;
@@ -2132,6 +2152,9 @@ public sealed class GameStage : Stage
             _charInfo.Guild    = stats.Guild;
         }
         if (_skill != null) _skill.SP = stats.SP;
+        // Feed the player's requirement stats to the item tooltips (unmet reqs show red).
+        _item?.SetPlayerStats(stats.Level, stats.Str, stats.Dex, stats.Int, stats.Luk, stats.JobId);
+        _equip?.SetPlayerStats(stats.Level, stats.Str, stats.Dex, stats.Int, stats.Luk, stats.JobId);
     }
 
     // Prefer the StringPool job name; fall back to the built-in table for jobs
