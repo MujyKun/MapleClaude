@@ -46,17 +46,15 @@ public sealed class PlayerController
     // ── Input edge-detect ─────────────────────────────────────────────────────
     private bool _prevJump;
 
-    // ── Transient swing pose (set by TriggerAttack, decays each tick) ──────────
-    private float _swingTimer;
-    private const float SwingDuration = 0.4f;
-
     public Vector2 Position   { get; set; }
     public Stance  Stance     { get; private set; } = Stance.Stand1;
     public int     Frame      { get; private set; }
     public bool    FacingLeft { get; private set; }
 
-    /// <summary>Force the player into the swing pose for <see cref="SwingDuration"/> seconds.</summary>
-    public void TriggerAttack() => _swingTimer = SwingDuration;
+    /// <summary>True while attached to a ladder/rope AND actively climbing (Up or Down
+    /// held). Drives the climb-frame freeze in <see cref="CharLook"/> so the pose holds
+    /// when you stop.</summary>
+    public bool    ClimbMoving { get; private set; }
 
     public PlayerController(FieldScene field)
     {
@@ -161,19 +159,13 @@ public sealed class PlayerController
             });
         }
 
-        // Update stance — a live swing pose overrides the movement-derived one.
-        if (_swingTimer > 0f)
-        {
-            _swingTimer -= dt;
-            Stance = Stance.Swing;
-        }
-        else
-        {
-            Stance = !_grounded             ? Stance.Jump
-                   : input.Down && dir == 0 ? Stance.Prone
-                   : dir != 0               ? Stance.Walk1   // walk anim even when blocked against a wall
-                   : Stance.Stand1;
-        }
+        // Movement-derived stance. A basic-attack swing is a one-shot animation owned
+        // by CharLook (it overrides the drawn pose and reverts on completion), so the
+        // controller's stance stays movement-driven — you can walk/jump while swinging.
+        Stance = !_grounded             ? Stance.Jump
+               : input.Down && dir == 0 ? Stance.Prone
+               : dir != 0               ? Stance.Walk1   // walk anim even when blocked against a wall
+               : Stance.Stand1;
 
         TickAnimAndFlush(dt);
     }
@@ -339,7 +331,12 @@ public sealed class PlayerController
         _grounded        = false;
         _currentFoothold = 0;
         _velocity        = Vector2.Zero;
-        Position         = new Vector2(lr.X, Position.Y);   // snap onto the ladder centre
+        ClimbMoving      = false;
+        // Snap onto the ladder centre AND into its [Top, Bottom] span. Grabbing from
+        // the ground at the base leaves Position.Y at/below Bottom; clamping in means
+        // the first climb tick moves up the ladder instead of immediately stepping
+        // back off the near end (the "puts me in position but won't climb" bug).
+        Position         = new Vector2(lr.X, Math.Clamp(Position.Y, lr.Top, lr.Bottom));
         Stance           = lr.IsLadder ? Stance.Ladder : Stance.Rope;
         return true;
     }
@@ -357,8 +354,9 @@ public sealed class PlayerController
         if (jumpEdge)
         {
             var hopDir = (input.Left ? -1 : 0) + (input.Right ? 1 : 0);
-            _climb    = null;
-            _grounded = false;
+            _climb       = null;
+            ClimbMoving  = false;
+            _grounded    = false;
             if (hopDir != 0) FacingLeft = hopDir < 0;
             _velocity = new Vector2(hopDir * WalkSpeed, -JumpSpeed * 0.7f);
             Stance    = Stance.Jump;
@@ -366,21 +364,26 @@ public sealed class PlayerController
         }
 
         var iy = (input.Up ? -1 : 0) + (input.Down ? 1 : 0);
-        _velocity = new Vector2(0f, iy * ClimbSpeed);
+        _velocity   = new Vector2(0f, iy * ClimbSpeed);
+        ClimbMoving = iy != 0;
         var newY = Position.Y + iy * ClimbSpeed * dt;
 
-        if (newY <= lr.Top)        // reached the top → step onto the platform above
+        // Direction-aware exits: only step off the TOP while climbing up, and off the
+        // BOTTOM while climbing down. (A single boundary test fires the instant you grab
+        // at the near end and refuses to climb — and bounces you off when starting from
+        // the platform above.)
+        if (iy < 0 && newY <= lr.Top)        // climbing up, reached the top → onto the platform above
         {
             LeaveLadderOntoGround(lr.X, lr.Top - 6f);
             return true;
         }
-        if (newY >= lr.Bottom)     // reached the bottom → step off onto the floor below
+        if (iy > 0 && newY >= lr.Bottom)     // climbing down, reached the bottom → onto the floor below
         {
             LeaveLadderOntoGround(lr.X, lr.Bottom + 2f);
             return true;
         }
 
-        Position = new Vector2(lr.X, newY);
+        Position = new Vector2(lr.X, Math.Clamp(newY, lr.Top, lr.Bottom));
         Stance   = lr.IsLadder ? Stance.Ladder : Stance.Rope;
         return iy != 0;            // animate only while moving
     }
@@ -389,8 +392,9 @@ public sealed class PlayerController
     /// foothold below if any, otherwise fall.</summary>
     private void LeaveLadderOntoGround(float x, float y)
     {
-        _climb    = null;
-        _velocity = Vector2.Zero;
+        _climb       = null;
+        ClimbMoving  = false;
+        _velocity    = Vector2.Zero;
         if (_field.GetFootholdBelow(x, y) is { } fh && fh.YAt(x) is { } gy)
         {
             Position         = new Vector2(x, gy);

@@ -1,3 +1,4 @@
+using MapleClaude.Character;
 using MapleClaude.Render;
 using MapleClaude.UI;
 using MapleClaude.Wz;
@@ -8,429 +9,598 @@ using Microsoft.Xna.Framework.Input;
 namespace MapleClaude.UI.Game;
 
 /// <summary>
-/// NPC dialog panel. Shown when the server sends NPC script packets.
-/// WZ: <c>UIWindow.img/NpcTalk/</c>
+/// Authentic NPC script / quest dialog — a port of the v95 client's <c>CUtilDlgEx</c>
+/// (driven by <c>CScriptMan</c>). The frame, name bar and buttons come from
+/// <c>UI.wz/UIWindow2.img/UtilDlgEx</c> (<c>t</c>/<c>c</c>/<c>s</c> vertical 3-slice +
+/// <c>bar</c> + <c>Bt*</c>); the speaker plays its animated <c>stand</c> action from
+/// <c>Npc.wz</c>; the body text is laid out by <see cref="ScriptText"/> with the same
+/// geometry constants the original client uses, a typewriter reveal, and inline
+/// <c>#L#…#l</c> menu links.
 /// </summary>
 public sealed class NpcTalk : GamePanel
 {
-    public enum DialogType { Ok, YesNo, Next, PrevNext, Menu, AskText, AskNumber, Quiz }
+    public enum DlgType { Say, YesNo, Menu, AskText, AskNumber, AskBoxText, SayImage }
+
+    // ── ScriptMessageParam flags (mirror MapleClaude.Net.Packet.ScriptMessageParam) ──────
+    private const byte ParamNotCancellable = 0x01;
+    private const byte ParamPlayerSpeaker  = 0x02;
+    private const byte ParamSpeakerRight   = 0x04;
+    private const byte ParamFlipSpeaker    = 0x08;
+
+    // Authentic dark-grey body text colour; name bar text is white.
+    private static readonly Color BodyColor = new(0x55, 0x55, 0x55);
+    private const float TypeCharsPerSec = 45f;
 
     private readonly WzTextureLoader _loader;
-    private readonly WzSprite? _background;
-    private readonly Button? _btOk;
-    private readonly Button? _btYes;
-    private readonly Button? _btNo;
-    private readonly Button? _btNext;
-    private readonly Button? _btPrev;
-    private readonly BuiltInFont? _font;
-    private readonly List<Button> _allButtons = new();
-    private readonly TextField _inputField = new() { Width = 300, Height = 22 };
+    private readonly WzPackage? _npcWz;
+    private readonly BuiltInFont _body;
+    private readonly BuiltInFont _bold;
+    private readonly BuiltInFont _name;
+    private readonly ScriptSubst _subst;
 
-    private string _text = string.Empty;
-    private DialogType _dialogType = DialogType.Ok;
-    private List<string> _menuItems = new();
-    private int _menuHover = -1;
-    private int _minNum, _maxNum;
-    private bool _numberOnly;
+    // Frame + name bar
+    private readonly WzSprite? _top;
+    private readonly WzSprite? _fill;
+    private readonly WzSprite? _bottom;
+    private readonly WzSprite? _bar;
 
-    // Portrait (speaker NPC face)
-    private WzSprite? _portrait;
+    // Buttons
+    private readonly Button? _btOk, _btYes, _btNo, _btNext, _btPrev, _btClose, _btQYes, _btQNo;
 
-    // Quiz timer
-    private float _quizTimerSec;
+    private readonly TextField _input = new() { DrawFallbackBox = false, TextColor = Color.Black };
 
-    // ── Callbacks ─────────────────────────────────────────────────────────────
+    // ── Callbacks (set per message by GameStage) ─────────────────────────────────────────
     public Action? OnOk { get; set; }
     public Action? OnYes { get; set; }
     public Action? OnNo { get; set; }
     public Action? OnNext { get; set; }
     public Action? OnPrev { get; set; }
+    public Action? OnClose { get; set; }
     public Action<int>? OnMenuChoice { get; set; }
     public Action<string>? OnTextConfirm { get; set; }
     public Action<int>? OnNumberConfirm { get; set; }
 
-    public NpcTalk(WzTextureLoader loader, WzPackage? ui, BuiltInFont? font)
+    // ── Per-message state ────────────────────────────────────────────────────────────────
+    private DlgType _type = DlgType.Say;
+    private byte _param;
+    private bool _quest;
+    private bool _hasPrev, _hasNext;
+    private int _minNum, _maxNum;
+    private NpcLook? _speaker;
+    private int _speakerId = -1;
+    private string _speakerName = string.Empty;
+    private ScriptText? _script;
+
+    // Computed layout (window-relative)
+    private int _wndWidth, _wndHeight, _ctLeft, _ctTop, _scrHeight, _textH;
+    private bool _scrollBar;
+    private int _scrollPos;
+
+    private float _reveal;            // typewriter char count
+    private int _menuHover = -1;
+    private int _viewW = 1024, _viewH = 768;
+
+    private readonly List<(Button btn, Vector2 off, Action act)> _active = new();
+
+    public NpcTalk(WzTextureLoader loader, WzPackage? ui, WzPackage? npcWz,
+                   BuiltInFont body, BuiltInFont bold, BuiltInFont name, ScriptSubst subst)
     {
         _loader = loader;
-        _font = font;
-        _inputField.Font = font;
+        _npcWz = npcWz;
+        _body = body;
+        _bold = bold;
+        _name = name;
+        _subst = subst;
+        _input.Font = body;
         IsVisible = false;
-        Position = new Vector2(170, 380);
 
-        var npc = ui?.GetItem("UIWindow.img/NpcTalk") as WzProperty;
-        _background = npc?.Get("backgrnd") is WzCanvas bc ? loader.Load(bc) : null;
+        var dlg = ui?.GetItem("UIWindow2.img/UtilDlgEx") as WzProperty;
+        _top    = dlg?.Get("t") is WzCanvas tc ? loader.Load(tc) : null;
+        _fill   = dlg?.Get("c") is WzCanvas cc ? loader.Load(cc) : null;
+        _bottom = dlg?.Get("s") is WzCanvas sc ? loader.Load(sc) : null;
+        _bar    = dlg?.Get("bar") is WzCanvas bc ? loader.Load(bc) : null;
 
-        _btOk   = MakeButton(loader, npc, "BtOK");
-        _btYes  = MakeButton(loader, npc, "BtYes");
-        _btNo   = MakeButton(loader, npc, "BtNo");
-        _btNext = MakeButton(loader, npc, "BtNext");
-        _btPrev = MakeButton(loader, npc, "BtPrev");
-
-        if (_btOk   != null) _btOk.OnClick   = HandleOk;
-        if (_btYes  != null) _btYes.OnClick  = HandleYes;
-        if (_btNo   != null) _btNo.OnClick   = HandleNo;
-        if (_btNext != null) _btNext.OnClick = HandleNext;
-        if (_btPrev != null) _btPrev.OnClick = HandlePrev;
+        _btOk    = MakeButton(dlg, "BtOK",   "OK");
+        _btYes   = MakeButton(dlg, "BtYes",  "Yes");
+        _btNo    = MakeButton(dlg, "BtNo",   "No");
+        _btNext  = MakeButton(dlg, "BtNext", "Next");
+        _btPrev  = MakeButton(dlg, "BtPrev", "Prev");
+        _btClose = MakeButton(dlg, "BtClose", "X");
+        _btQYes  = MakeButton(dlg, "BtQYes", "Accept");
+        _btQNo   = MakeButton(dlg, "BtQNo",  "Decline");
     }
 
-    // ── Portrait ──────────────────────────────────────────────────────────────
-
-    /// <summary>Load NPC portrait from Npc.wz for the given template ID. Safe with null package.</summary>
-    public void LoadPortrait(WzPackage? npcWz, int speakerId)
+    private Button? MakeButton(WzProperty? dlg, string node, string fallback)
     {
-        _portrait = null;
-        if (npcWz is null || speakerId <= 0) return;
-        if (npcWz.GetItem($"{speakerId:D7}.img") is not WzImage img) return;
-        var root = img.Root;
-        // Try common animation states to find a first frame
-        foreach (var stateName in (string[])["stand", "walk", "move", "idle", "default"])
+        var b = new Button(_loader, dlg?.Get(node) as WzProperty)
         {
-            if (root?.Get(stateName) is not WzProperty stateNode) continue;
-            var raw = stateNode.Get("0");
-            WzCanvas? canvas = raw switch
+            FallbackLabel = fallback,
+            Font = _name,
+        };
+        return b;
+    }
+
+    // ── Show entry points ────────────────────────────────────────────────────────────────
+
+    public void ShowSay(int speakerId, byte param, string text, bool hasPrev, bool hasNext)
+    {
+        Begin(DlgType.Say, speakerId, param);
+        _hasPrev = hasPrev;
+        _hasNext = hasNext;
+        BuildScript(text);
+        Finish();
+    }
+
+    public void ShowYesNo(int speakerId, byte param, string text, bool quest)
+    {
+        Begin(DlgType.YesNo, speakerId, param);
+        _quest = quest;
+        BuildScript(text);
+        Finish();
+    }
+
+    public void ShowMenu(int speakerId, byte param, string text)
+    {
+        Begin(DlgType.Menu, speakerId, param);
+        BuildScript(text);
+        _reveal = _script?.TotalChars ?? 0;   // menu items show immediately so they're readable/clickable
+        Finish();
+    }
+
+    public void ShowAskText(int speakerId, byte param, string text, string def, int minLen, int maxLen, bool boxText = false)
+    {
+        Begin(boxText ? DlgType.AskBoxText : DlgType.AskText, speakerId, param);
+        BuildScript(text);
+        _reveal = _script?.TotalChars ?? 0;   // menus / inputs show their text immediately
+        _input.IsPassword = false;
+        _input.Text = def ?? string.Empty;
+        _input.MaxLength = Math.Max(1, maxLen > 0 ? maxLen : 24);
+        _input.IsFocused = true;
+        Finish();
+    }
+
+    public void ShowAskNumber(int speakerId, byte param, string text, int def, int min, int max)
+    {
+        Begin(DlgType.AskNumber, speakerId, param);
+        BuildScript(text);
+        _reveal = _script?.TotalChars ?? 0;   // menus / inputs show their text immediately
+        _minNum = min;
+        _maxNum = max <= 0 ? int.MaxValue : max;
+        _input.IsPassword = false;
+        _input.Text = def.ToString();
+        _input.MaxLength = 10;
+        _input.IsFocused = true;
+        Finish();
+    }
+
+    private void Begin(DlgType type, int speakerId, byte param)
+    {
+        _type = type;
+        _param = param;
+        _quest = false;
+        _hasPrev = _hasNext = false;
+        _scrollPos = 0;
+        _reveal = 0;
+        _menuHover = -1;
+
+        // Reuse the speaker across paging (Say next/prev) when the NPC is unchanged.
+        if (speakerId != _speakerId || _speaker is null)
+        {
+            _speakerId = speakerId;
+            if ((param & ParamPlayerSpeaker) != 0 || speakerId <= 0)
             {
-                WzCanvas c => c,
-                WzProperty fp => fp.Items.Select(kv => kv.Value as WzCanvas).FirstOrDefault(c => c is not null),
-                _ => null,
-            };
-            if (canvas is null) continue;
-            _portrait = _loader.Load(canvas);
-            break;
+                _speaker = null;
+                _speakerName = _subst.PlayerName;
+            }
+            else
+            {
+                _speaker = new NpcLook(speakerId, Vector2.Zero, _name);
+                _speaker.Load(_loader, _npcWz);
+                _speaker.SetState("stand");
+                _speakerName = _speaker.Name;
+            }
+        }
+        _subst.SpeakerName = _speakerName;
+    }
+
+    private void BuildScript(string text)
+    {
+        var (wrap, margin) = ContentMetrics();
+        _script = new ScriptText(text, wrap, margin, _body, _bold, BodyColor, _subst);
+        _textH = _script.ContentHeight;
+    }
+
+    private void Finish()
+    {
+        ComputeLayout();
+        IsVisible = true;
+    }
+
+    // ── Authentic geometry (GetWndWidth / GetBasicCTWidth / GetBasicCTMargin / clamps) ────
+
+    private bool NoNpc => _speaker is null && (_param & ParamPlayerSpeaker) == 0;
+
+    private int WndWidth => _type == DlgType.SayImage ? 418 : (NoNpc ? 260 : 519);
+
+    private (int wrap, int margin) ContentMetrics() => _type switch
+    {
+        DlgType.AskText or DlgType.AskNumber or DlgType.AskBoxText => (NoNpc ? 236 : 340, 2),
+        DlgType.SayImage => (400, 8),
+        _ => (NoNpc ? 210 : 341, 8),   // Say / YesNo / Menu
+    };
+
+    private int CtHeightMax => _type switch
+    {
+        DlgType.Say or DlgType.YesNo or DlgType.Menu => 240,
+        DlgType.SayImage => 300,
+        _ => int.MaxValue,   // input types are unbounded
+    };
+
+    private int CtHeightMin => _type == DlgType.SayImage ? 300 : (NoNpc ? 0 : 110);
+
+    private void ComputeLayout()
+    {
+        _wndWidth = WndWidth;
+
+        // Content height = analysed text height, plus the menu trailing gap / input box room.
+        var contentH = _textH;
+        if (_type == DlgType.Menu) contentH += 5;
+        if (_type is DlgType.AskText or DlgType.AskNumber or DlgType.AskBoxText) contentH += 24;
+
+        var max = CtHeightMax;
+        var min = CtHeightMin;
+        _scrollBar = contentH > max;
+        _scrHeight = Math.Clamp(contentH, min, max);
+
+        var speakerRight = (_param & ParamSpeakerRight) != 0;
+        _ctLeft = (speakerRight ? 23 : 158) - (_scrollBar ? 4 : 0);
+        _ctTop  = (contentH <= _scrHeight ? (_scrHeight - contentH + 6) / 2 : -6) + 22;
+        _wndHeight = _scrHeight + 80;
+
+        // Centre on screen (CreateUtilDlgEx → CreateDlg centred).
+        Position = new Vector2((_viewW - _wndWidth) / 2f, (_viewH - _wndHeight) / 2f);
+
+        BuildButtons();
+        ApplyButtonPositions();
+    }
+
+    public override void Relayout(int viewWidth, int viewHeight)
+    {
+        _viewW = viewWidth;
+        _viewH = viewHeight;
+        if (IsVisible) ComputeLayout();
+    }
+
+    // ── Buttons (OnCreate_TEXT / _YESNO / _LIST / _INPUT positions) ───────────────────────
+
+    private void BuildButtons()
+    {
+        _active.Clear();
+        var w = _wndWidth;
+        var h = _wndHeight;
+        var right = (_param & ParamSpeakerRight) != 0 ? 140 : 10;
+        var cancellable = (_param & ParamNotCancellable) == 0;
+
+        switch (_type)
+        {
+            case DlgType.Say:
+            case DlgType.SayImage:
+                if (_hasPrev) Add(_btPrev, w - right - 106 - (_scrollBar ? 5 : 0), h - 57, HandlePrev);
+                if (_hasNext) Add(_btNext, w - right - 58  - (_scrollBar ? 5 : 0), h - 57, HandleNext);
+                else          Add(_btOk,   w - 48, h - 24, HandleOk);
+                break;
+
+            case DlgType.YesNo:
+                if (_quest)
+                {
+                    Add(_btQYes, w - 130, h - 24, HandleYes);
+                    Add(_btQNo,  w - 65,  h - 24, HandleNo);
+                }
+                else
+                {
+                    Add(_btYes, w - 130, h - 24, HandleYes);
+                    Add(_btNo,  w - 65,  h - 24, HandleNo);
+                }
+                break;
+
+            case DlgType.Menu:
+                // Selection is by clicking a link; a Next button confirms the focused item.
+                break;
+
+            case DlgType.AskText:
+            case DlgType.AskNumber:
+            case DlgType.AskBoxText:
+                Add(_btOk, w - 48, h - 24, HandleOk);
+                break;
+        }
+
+        if (cancellable)
+            Add(_btClose, _type == DlgType.Menu ? 10 : 9, h - 24, HandleClose);
+    }
+
+    private void Add(Button? b, int x, int y, Action act)
+    {
+        if (b is null) return;
+        _active.Add((b, new Vector2(x, y), act));
+    }
+
+    private void ApplyButtonPositions()
+    {
+        foreach (var (b, off, _) in _active)
+            b.Position = Position + off;
+
+        // Input box position (OnCreate_INPUT): below the prompt text.
+        if (_type is DlgType.AskText or DlgType.AskNumber or DlgType.AskBoxText)
+        {
+            _input.Position = new Vector2(Position.X + _ctLeft + 2, Position.Y + _ctTop + _textH + 5);
+            _input.Width = _wndWidth - (2 * _ctLeft + 2);
+            _input.Height = 14;
         }
     }
 
-    // ── Show methods ──────────────────────────────────────────────────────────
+    // ── Update ───────────────────────────────────────────────────────────────────────────
 
-    public void Show(string text, DialogType type = DialogType.Ok)
+    public override void Update(GameTime gameTime)
     {
-        _text       = text;
-        _dialogType = type;
-        _menuItems.Clear();
-        IsVisible   = true;
+        if (!IsVisible)
+        {
+            if (_input.IsFocused) _input.IsFocused = false;
+            return;
+        }
+        var dt = (float)gameTime.ElapsedGameTime.TotalSeconds;
+        _speaker?.Update(dt);
+        _input.Update(gameTime);
+        if (_script != null && _reveal < _script.TotalChars)
+            _reveal += dt * TypeCharsPerSec;
+        ApplyButtonPositions();
+
+        if (_type == DlgType.Menu)
+        {
+            var ms = Mouse.GetState();
+            UpdateMenuHover(ms.X, ms.Y);
+        }
     }
 
-    public void ShowMenu(string text, IReadOnlyList<string> items)
+    // ── Draw ─────────────────────────────────────────────────────────────────────────────
+
+    public override void Draw(SpriteBatch sb, Texture2D white)
     {
-        _text       = text;
-        _dialogType = DialogType.Menu;
-        _menuItems  = new List<string>(items);
-        _menuHover  = -1;
-        IsVisible   = true;
+        if (!IsVisible || _script is null) return;
+
+        DrawFrame(sb, white);
+        if (!NoNpc) DrawSpeaker(sb);
+        DrawBody(sb, white);
+
+        if (_type == DlgType.Menu) DrawMenuUnderline(sb, white);
+        if (_type is DlgType.AskText or DlgType.AskNumber or DlgType.AskBoxText) DrawInput(sb, white);
+
+        foreach (var (b, _, _) in _active) { b.WhitePixel ??= white; b.Draw(sb); }
     }
 
-    public void ShowAskText(string text, string defaultText = "", int minLen = 0, int maxLen = 24)
+    private void DrawFrame(SpriteBatch sb, Texture2D white)
     {
-        _text            = text;
-        _dialogType      = DialogType.AskText;
-        _menuItems.Clear();
-        _numberOnly      = false;
-        _inputField.Text = defaultText;
-        _inputField.MaxLength = Math.Max(1, maxLen > 0 ? maxLen : 24);
-        _inputField.IsFocused = true;
-        IsVisible        = true;
+        if (_top is null || _fill is null || _bottom is null)
+        {
+            // Asset fallback: solid panel so the dialog is still usable.
+            var r = new Rectangle((int)Position.X, (int)Position.Y, _wndWidth, _wndHeight);
+            sb.Draw(white, r, new Color(245, 235, 210));
+            sb.Draw(white, new Rectangle(r.X, r.Y, r.Width, 1), new Color(120, 100, 70));
+            sb.Draw(white, new Rectangle(r.X, r.Bottom - 1, r.Width, 1), new Color(120, 100, 70));
+            sb.Draw(white, new Rectangle(r.X, r.Y, 1, r.Height), new Color(120, 100, 70));
+            sb.Draw(white, new Rectangle(r.Right - 1, r.Y, 1, r.Height), new Color(120, 100, 70));
+            return;
+        }
+
+        var x = (int)Position.X;
+        var topH = _top.Height;
+        var botH = _bottom.Height;
+        var span = Math.Max(0, _wndHeight - topH - botH);
+        _top.Draw(sb, Position);
+        sb.Draw(_fill.Texture, new Rectangle(x, (int)Position.Y + topH, _fill.Width, span), Color.White);
+        _bottom.Draw(sb, new Vector2(x, Position.Y + _wndHeight - botH));
     }
 
-    public void ShowAskNumber(string text, int defaultNum = 0, int minNum = 0, int maxNum = 999999)
+    private void DrawSpeaker(SpriteBatch sb)
     {
-        _text            = text;
-        _dialogType      = DialogType.AskNumber;
-        _menuItems.Clear();
-        _numberOnly      = true;
-        _minNum          = minNum;
-        _maxNum          = maxNum;
-        _inputField.Text = defaultNum.ToString();
-        _inputField.MaxLength = 10;
-        _inputField.IsFocused = true;
-        IsVisible        = true;
+        var topH = _top?.Height ?? 0;
+        var botH = _bottom?.Height ?? 0;
+        var barW = _bar?.Width ?? 121;
+        var barH = _bar?.Height ?? 23;
+        var speakerY = (topH + (_wndHeight - topH - botH) + botH) / 2;
+        var speakerRight = (_param & ParamSpeakerRight) != 0;
+        var regionX = speakerRight ? _wndWidth - 22 - barW : 22;
+        var speakerPos = Position + new Vector2(regionX, 11 + speakerY);
+        var center = speakerPos + new Vector2(barW / 2f, 0);
+
+        var flip = (_param & ParamFlipSpeaker) != 0;
+        _speaker?.DrawFrameOnly(sb, center, flip);
+        _bar?.Draw(sb, speakerPos);
+
+        if (!string.IsNullOrEmpty(_speakerName))
+        {
+            var sz = _name.Measure(_speakerName);
+            var ny = speakerPos.Y + (barH - _name.LineHeight) / 2f;
+            _name.Draw(sb, _speakerName, new Vector2(center.X - sz.X / 2f, ny), Color.White);
+        }
     }
 
-    public void ShowQuiz(string text, string hint = "", int minLen = 0, int maxLen = 24, int remainSec = 60)
+    private void DrawBody(SpriteBatch sb, Texture2D white)
     {
-        _text            = text;
-        _dialogType      = DialogType.Quiz;
-        _menuItems.Clear();
-        _numberOnly      = false;
-        _inputField.Text = hint;
-        _inputField.MaxLength = Math.Max(1, maxLen > 0 ? maxLen : 24);
-        _inputField.IsFocused = true;
-        _quizTimerSec    = Math.Max(1f, remainSec);
-        IsVisible        = true;
+        if (_script is null) return;
+        var origin = new Vector2(Position.X + _ctLeft, Position.Y + _ctTop - _scrollPos);
+        var reveal = (int)_reveal;
+        foreach (var run in _script.Runs)
+        {
+            var yLocal = run.Y - _scrollPos;
+            if (yLocal + _script.LineHeight < 0 || yLocal > _scrHeight + 4) continue; // cull to content
+            if (run.CharStart >= reveal) continue;
+
+            var text = run.CharStart + run.Text.Length <= reveal
+                ? run.Text
+                : run.Text[..Math.Max(0, reveal - run.CharStart)];
+            if (text.Length == 0) continue;
+
+            var font = run.Bold ? _bold : _body;
+            font.Draw(sb, text, new Vector2(origin.X + run.X, origin.Y + run.Y), run.Color);
+        }
     }
 
-    // ── Button handlers ───────────────────────────────────────────────────────
+    private void DrawMenuUnderline(SpriteBatch sb, Texture2D white)
+    {
+        if (_script is null || _menuHover < 0) return;
+        foreach (var link in _script.Links)
+        {
+            if (link.Index != _menuHover) continue;
+            var b = link.Bounds;
+            var y = (int)(Position.Y + _ctTop - _scrollPos) + b.Bottom - 1;
+            // Dotted gray underline (CUtilDlgEx draws 0xFF919191 segments).
+            for (var dx = 0; dx < b.Width; dx += 3)
+                sb.Draw(white, new Rectangle((int)(Position.X + _ctLeft) + b.X + dx, y, 2, 1), new Color(0x91, 0x91, 0x91));
+        }
+    }
+
+    private void DrawInput(SpriteBatch sb, Texture2D white)
+    {
+        // White recess with a 1px black border, just under the prompt (OnCreate_INPUT).
+        var bx = (int)Position.X + _ctLeft - 1;
+        var by = (int)Position.Y + _ctTop + _textH + 2;
+        var bw = _wndWidth - 2 * _ctLeft + 3;
+        sb.Draw(white, new Rectangle(bx, by, bw, 18), Color.Black);
+        sb.Draw(white, new Rectangle(bx + 1, by + 1, bw - 2, 16), Color.White);
+        _input.Draw(sb, white);
+    }
+
+    // ── Button handlers ──────────────────────────────────────────────────────────────────
 
     private void HandleOk()
     {
-        switch (_dialogType)
+        switch (_type)
         {
-            case DialogType.AskText:
-            case DialogType.Quiz:
-                var txt = _inputField.Text;
-                _inputField.Clear();
-                IsVisible = false;
-                OnTextConfirm?.Invoke(txt);
+            case DlgType.AskText:
+            case DlgType.AskBoxText:
+                var t = _input.Text;
+                Hide();
+                OnTextConfirm?.Invoke(t);
                 break;
-            case DialogType.AskNumber:
-                var raw = _inputField.Text;
-                _inputField.Clear();
-                IsVisible = false;
-                if (int.TryParse(raw, out var num))
-                    OnNumberConfirm?.Invoke(Math.Clamp(num, _minNum, _maxNum));
+            case DlgType.AskNumber:
+                var raw = _input.Text;
+                Hide();
+                if (int.TryParse(raw, out var n))
+                    OnNumberConfirm?.Invoke(Math.Clamp(n, _minNum, _maxNum));
+                else
+                    OnNumberConfirm?.Invoke(Math.Clamp(0, _minNum, _maxNum));
                 break;
             default:
-                IsVisible = false;
+                Hide();
                 OnOk?.Invoke();
                 break;
         }
     }
 
-    private void HandleYes()  { IsVisible = false; OnYes?.Invoke(); }
-    private void HandleNo()   { IsVisible = false; OnNo?.Invoke(); }
-    private void HandleNext() { OnNext?.Invoke(); }
+    private void HandleYes()  { Hide(); OnYes?.Invoke(); }
+    private void HandleNo()   { Hide(); OnNo?.Invoke(); }
+    private void HandleNext() { OnNext?.Invoke(); }      // stays open; server sends the next page
     private void HandlePrev() { OnPrev?.Invoke(); }
+    private void HandleClose(){ Hide(); OnClose?.Invoke(); }
 
-    // ── Layout ────────────────────────────────────────────────────────────────
-
-    private int DialogHeight => _dialogType switch
+    private void Hide()
     {
-        DialogType.Menu      => 80 + Math.Max(1, _menuItems.Count) * 20 + 10,
-        DialogType.AskText   => 160,
-        DialogType.AskNumber => 160,
-        DialogType.Quiz      => 170,
-        _                    => 130,
-    };
-
-    private void ApplyLayout()
-    {
-        var h = DialogHeight;
-        var btnY = Position.Y + h - 26;
-        if (_btOk   != null) _btOk.Position   = new Vector2(Position.X + 430, btnY);
-        if (_btYes  != null) _btYes.Position  = new Vector2(Position.X + 390, btnY);
-        if (_btNo   != null) _btNo.Position   = new Vector2(Position.X + 430, btnY);
-        if (_btNext != null) _btNext.Position = new Vector2(Position.X + 430, btnY);
-        if (_btPrev != null) _btPrev.Position = new Vector2(Position.X + 390, btnY);
-        _inputField.Position = new Vector2(Position.X + 70, Position.Y + 85);
+        IsVisible = false;
+        _input.IsFocused = false;
+        _input.Clear();
     }
 
-    public override void Update(GameTime gameTime)
-    {
-        ApplyLayout();
-        // A hidden dialog must not keep the text-input focus (else Right Alt stays armed for the IME).
-        if (!IsVisible && _inputField.IsFocused) _inputField.IsFocused = false;
-        if (_dialogType == DialogType.Quiz && IsVisible && _quizTimerSec > 0)
-        {
-            _quizTimerSec -= (float)gameTime.ElapsedGameTime.TotalSeconds;
-            if (_quizTimerSec <= 0)
-            {
-                _quizTimerSec = 0;
-                IsVisible = false;
-                OnNo?.Invoke();   // timeout = cancel
-            }
-        }
-    }
-
-    // ── Draw ──────────────────────────────────────────────────────────────────
-
-    public override void Draw(SpriteBatch sb, Texture2D white)
-    {
-        if (!IsVisible) return;
-
-        ApplyLayout();
-        var h = DialogHeight;
-
-        // NPC portrait — drawn above-left of the dialog box
-        if (_portrait != null)
-            _portrait.Draw(sb, Position + new Vector2(6, -90));
-
-        // Background
-        if (_background != null)
-            _background.Draw(sb, Position + new Vector2(234, 65));
-        else
-        {
-            sb.Draw(white, new Rectangle((int)Position.X, (int)Position.Y, 470, h), new Color(15, 15, 25, 230));
-            DrawBorder(sb, white, new Rectangle((int)Position.X, (int)Position.Y, 470, h));
-        }
-
-        // Main text
-        DrawText(sb, _text, Position + new Vector2(10, 10), Color.White, 450);
-
-        switch (_dialogType)
-        {
-            case DialogType.Ok:
-                _btOk?.Draw(sb);
-                break;
-            case DialogType.YesNo:
-                _btYes?.Draw(sb);
-                _btNo?.Draw(sb);
-                break;
-            case DialogType.Next:
-                _btNext?.Draw(sb);
-                break;
-            case DialogType.PrevNext:
-                _btPrev?.Draw(sb);
-                _btNext?.Draw(sb);
-                break;
-            case DialogType.Menu:
-                DrawMenuItems(sb, white);
-                break;
-            case DialogType.AskText:
-            case DialogType.AskNumber:
-                DrawInputField(sb, white);
-                _btOk?.Draw(sb);
-                _btNo?.Draw(sb);
-                break;
-            case DialogType.Quiz:
-                DrawInputField(sb, white);
-                // Countdown timer
-                var secs     = (int)Math.Ceiling(_quizTimerSec);
-                var timerStr = $"Time: {secs}s";
-                var timerClr = _quizTimerSec < 10 ? new Color(255, 80, 80) : new Color(220, 200, 100);
-                _font?.Draw(sb, timerStr, Position + new Vector2(340, 88), timerClr);
-                _btOk?.Draw(sb);
-                _btNo?.Draw(sb);
-                break;
-        }
-    }
-
-    private void DrawMenuItems(SpriteBatch sb, Texture2D white)
-    {
-        if (_font is null) return;
-        var lineH = _font.LineHeight + 4;
-        for (var i = 0; i < _menuItems.Count; i++)
-        {
-            var itemPos = new Vector2(Position.X + 10, Position.Y + 72 + i * lineH);
-            var itemBg  = new Rectangle((int)itemPos.X - 2, (int)itemPos.Y - 1, 450, lineH);
-            if (_menuHover == i)
-                sb.Draw(white, itemBg, new Color(80, 70, 40, 160));
-            var color = _menuHover == i ? new Color(255, 220, 80) : Color.LightYellow;
-            _font.Draw(sb, $"{i + 1}. {_menuItems[i]}", itemPos, color);
-        }
-    }
-
-    private void DrawInputField(SpriteBatch sb, Texture2D white)
-    {
-        var bounds = _inputField.Bounds;
-        sb.Draw(white, bounds, new Color(20, 20, 35, 220));
-        DrawBorder(sb, white, bounds);
-        _inputField.Draw(sb, white);
-    }
-
-    private void DrawText(SpriteBatch sb, string text, Vector2 origin, Color color, int maxWidth)
-    {
-        if (_font is null || string.IsNullOrEmpty(text)) return;
-        var lh    = _font.LineHeight + 2;
-        var pos   = origin;
-        var clean = StripFormatCodes(text);
-        foreach (var rawLine in clean.Split('\n'))
-        {
-            var line = rawLine.TrimEnd('\r');
-            _font.Draw(sb, line, pos, color);
-            pos.Y += lh;
-        }
-    }
-
-    private static string StripFormatCodes(string text)
-    {
-        var sb = new System.Text.StringBuilder(text.Length);
-        var i = 0;
-        while (i < text.Length)
-        {
-            if (text[i] == '#' && i + 1 < text.Length)
-            {
-                if (text[i + 1] == 'L')
-                {
-                    var j = i + 2;
-                    while (j < text.Length && char.IsDigit(text[j])) j++;
-                    if (j < text.Length && text[j] == '#') { i = j + 1; continue; }
-                }
-                if (text[i + 1] == 'l') { i += 2; continue; }
-                if (char.IsLetter(text[i + 1])) { i += 2; continue; }
-            }
-            sb.Append(text[i]);
-            i++;
-        }
-        return sb.ToString();
-    }
-
-    // ── Input routing ─────────────────────────────────────────────────────────
+    // ── Input routing ────────────────────────────────────────────────────────────────────
 
     public override bool HandleMouseButton(int x, int y, bool down)
     {
         if (!IsVisible) return false;
 
-        foreach (var b in _allButtons)
-            if (b.HandleMouseButton(x, y, down)) return true;
-
-        if (_dialogType == DialogType.Menu && _menuItems.Count > 0)
+        // Buttons first.
+        foreach (var (b, _, act) in _active)
         {
-            var lh = (_font?.LineHeight ?? 14) + 4;
-            for (var i = 0; i < _menuItems.Count; i++)
+            if (b.HandleMouseButton(x, y, down))
             {
-                var itemRect = new Rectangle(
-                    (int)Position.X + 8,
-                    (int)Position.Y + 71 + i * lh,
-                    450, lh);
-                if (itemRect.Contains(x, y))
+                if (!down) act();
+                return true;
+            }
+        }
+
+        // Menu link selection.
+        if (_type == DlgType.Menu && _script != null)
+        {
+            var ox = (int)(Position.X + _ctLeft);
+            var oy = (int)(Position.Y + _ctTop - _scrollPos);
+            _menuHover = -1;
+            foreach (var link in _script.Links)
+            {
+                var r = new Rectangle(ox + link.Bounds.X, oy + link.Bounds.Y, link.Bounds.Width, link.Bounds.Height);
+                if (r.Contains(x, y))
                 {
-                    if (down) _menuHover = i;
-                    else { IsVisible = false; OnMenuChoice?.Invoke(i); }
+                    if (down) _menuHover = link.Index;
+                    else { Hide(); OnMenuChoice?.Invoke(link.Index); }
                     return true;
                 }
             }
-            _menuHover = -1;
         }
 
-        if (_dialogType is DialogType.AskText or DialogType.AskNumber or DialogType.Quiz)
-            _inputField.HandleMouseButton(x, y, down);
+        // Input focus.
+        if (_type is DlgType.AskText or DlgType.AskNumber or DlgType.AskBoxText)
+            _input.HandleMouseButton(x, y, down);
 
-        return new Rectangle((int)Position.X, (int)Position.Y, 470, DialogHeight).Contains(x, y);
+        // Click on the body completes the typewriter reveal.
+        if (down && _script != null && _reveal < _script.TotalChars)
+            _reveal = _script.TotalChars;
+
+        // Swallow clicks anywhere on the dialog.
+        return new Rectangle((int)Position.X, (int)Position.Y, _wndWidth, _wndHeight).Contains(x, y);
+    }
+
+    private void UpdateMenuHover(int x, int y)
+    {
+        if (_script is null) return;
+        var ox = (int)(Position.X + _ctLeft);
+        var oy = (int)(Position.Y + _ctTop - _scrollPos);
+        _menuHover = -1;
+        foreach (var link in _script.Links)
+        {
+            var r = new Rectangle(ox + link.Bounds.X, oy + link.Bounds.Y, link.Bounds.Width, link.Bounds.Height);
+            if (r.Contains(x, y)) { _menuHover = link.Index; break; }
+        }
     }
 
     public override bool OnKeyPress(Keys key)
     {
         if (!IsVisible) return false;
 
-        if (_dialogType is DialogType.AskText or DialogType.AskNumber or DialogType.Quiz)
+        if (_type is DlgType.AskText or DlgType.AskNumber or DlgType.AskBoxText)
         {
             var kb = Keyboard.GetState();
-            if (_inputField.OnKeyPress(key, kb)) return true;
+            if (_input.OnKeyPress(key, kb)) return true;
             if (key == Keys.Enter)  { HandleOk(); return true; }
-            if (key == Keys.Escape) { IsVisible = false; OnNo?.Invoke(); return true; }
+            if (key == Keys.Escape) { HandleClose(); return true; }
             return true;
         }
 
-        if (key == Keys.Enter)  { HandleOk(); return true; }
-        if (key == Keys.Escape) { IsVisible = false; OnNo?.Invoke(); return true; }
+        if (key == Keys.Enter)
+        {
+            // Advance: Next if present, else Yes/OK.
+            if (_type == DlgType.YesNo) HandleYes();
+            else if (_hasNext) HandleNext();
+            else HandleOk();
+            return true;
+        }
+        if (key == Keys.Escape) { HandleClose(); return true; }
         return true;
     }
 
     public override void OnTextInput(char character)
     {
         if (!IsVisible) return;
-        if (_dialogType is DialogType.AskText or DialogType.AskNumber or DialogType.Quiz)
+        if (_type is DlgType.AskText or DlgType.AskNumber or DlgType.AskBoxText)
         {
-            if (_numberOnly && !char.IsDigit(character) && character != '-') return;
-            _inputField.OnTextInput(character);
+            if (_type == DlgType.AskNumber && !char.IsDigit(character) && character != '\b' && character != '-') return;
+            _input.OnTextInput(character);
         }
-    }
-
-    // ── Helpers ───────────────────────────────────────────────────────────────
-
-    private Button? MakeButton(WzTextureLoader loader, WzProperty? root, string name)
-    {
-        var pr = root?.Get(name) as WzProperty;
-        if (pr is null) return null;
-        var b = new Button(loader, pr);
-        _allButtons.Add(b);
-        return b;
-    }
-
-    private static void DrawBorder(SpriteBatch sb, Texture2D white, Rectangle r)
-    {
-        var c = new Color(80, 70, 50);
-        sb.Draw(white, new Rectangle(r.X, r.Y, r.Width, 1), c);
-        sb.Draw(white, new Rectangle(r.X, r.Bottom - 1, r.Width, 1), c);
-        sb.Draw(white, new Rectangle(r.X, r.Y, 1, r.Height), c);
-        sb.Draw(white, new Rectangle(r.Right - 1, r.Y, 1, r.Height), c);
     }
 }

@@ -1,3 +1,4 @@
+using MapleClaude.Character;
 using MapleClaude.Render;
 using MapleClaude.UI;
 using MapleClaude.Wz;
@@ -8,135 +9,157 @@ using Microsoft.Xna.Framework.Input;
 namespace MapleClaude.UI.Game;
 
 /// <summary>
-/// Equipment inventory panel. Toggle with E.
-/// Shows the paperdoll slot layout: Hat, Face, Eye, Ear, Top, Bottom,
-/// Shoes, Gloves, Cape, Ring, Pendant, Belt, Weapon, Shield/Secondary, Medal.
-/// Each slot is a labelled drop-zone; icons appear when wired to inventory data.
-/// WZ: UIWindow.img/Equip/
+/// Equipment window — the v95 <c>CUIEquip</c>. Toggle with E.
+///
+/// A faithful rebuild of the real client: the authentic WZ frame from
+/// <c>UI/UIWindow2.img/Equip/character</c> (backgrnd + slot-cell panel + the labelled
+/// empty grid), the exact slot layout from the client, and real item icons drawn in
+/// each worn slot. There is no character preview inside the window — v95 doesn't have one.
+///
+/// Slots are keyed by the positive body-part index (1..51), matching the inventory
+/// wire data and <see cref="MapleClaude.Domain.AvatarLook"/>.HairEquip. Cell layout
+/// follows the client's grid: <c>x = 33*col + 10</c>, <c>y = 33*row + 27</c>, each cell 32×32.
 /// </summary>
 public sealed class EquipInventory : GamePanel
 {
-    // ── Slot definition ────────────────────────────────────────────────────────
-    private sealed class EquipSlot
+    // Visible window bounds (the backgrnd canvas is 184×290; the window content box is 184×304).
+    private const int PanelW   = 184;
+    private const int PanelH   = 290;
+    private const int TitleH   = 20;   // draggable titlebar height (baked into backgrnd art)
+    private const int Cell     = 32;   // slot icon cell
+
+    // Body-part -> cell top-left (content space, relative to the window top-left).
+    // Verified against the v95 CUIEquip slot table (m_sEqSlotInfo).
+    private static readonly Dictionary<int, Point> SlotPos = new()
     {
-        public string Label;
-        public Point  Offset;   // pixels from panel top-left (content area)
-        public string Key;      // inventory key (server-side)
-        public EquipSlot(string label, Point offset, string key)
-            { Label = label; Offset = offset; Key = key; }
-    }
+        [1]  = new Point(43,  27),   // Cap
+        [2]  = new Point(43,  60),   // Face accessory
+        [3]  = new Point(43,  93),   // Eye accessory
+        [4]  = new Point(109, 93),   // Earring
+        [5]  = new Point(43,  126),  // Clothes (top / overall)
+        [6]  = new Point(43,  159),  // Pants
+        [7]  = new Point(76,  192),  // Shoes
+        [8]  = new Point(10,  159),  // Gloves
+        [9]  = new Point(10,  126),  // Cape
+        [10] = new Point(142, 126),  // Shield
+        [11] = new Point(109, 126),  // Weapon
+        [12] = new Point(109, 159),  // Ring 1
+        [13] = new Point(142, 159),  // Ring 2
+        [15] = new Point(109, 60),   // Ring 3
+        [16] = new Point(142, 60),   // Ring 4
+        [17] = new Point(76,  126),  // Pendant
+        [18] = new Point(10,  225),  // Taming mob (mount)
+        [19] = new Point(43,  225),  // Saddle
+        [20] = new Point(76,  225),  // Mob equip
+        [49] = new Point(10,  60),   // Medal
+        [50] = new Point(76,  159),  // Belt
+        [51] = new Point(142, 93),   // Shoulder
+    };
 
-    // Paperdoll layout for 800×600; panel starts at Position (550, 50)
-    // Each slot is 32×32; layout based on v95 reference equip window
-    private static readonly EquipSlot[] Slots =
-    [
-        // Head column
-        new("Hat",      new Point(69,  22),  "Hat"),
-        new("Face",     new Point(35,  60),  "FaceAcc"),
-        new("Eye",      new Point(69,  60),  "EyeAcc"),
-        new("Ear",      new Point(103, 60),  "Earring"),
-        // Torso column
-        new("Top",      new Point(69,  98),  "Top"),
-        new("Overall",  new Point(69,  136), "Overall"),
-        new("Bottom",   new Point(69,  174), "Bottom"),
-        // Extremities
-        new("Shoes",    new Point(69,  212), "Shoes"),
-        new("Gloves",   new Point(35,  174), "Gloves"),
-        new("Cape",     new Point(103, 98),  "Cape"),
-        // Accessories
-        new("Ring 1",   new Point(35,  98),  "Ring1"),
-        new("Ring 2",   new Point(35,  136), "Ring2"),
-        new("Pendant",  new Point(103, 136), "Pendant"),
-        new("Belt",     new Point(69,  250), "Belt"),
-        // Weapons
-        new("Weapon",   new Point(35,  212), "Weapon"),
-        new("Shield",   new Point(103, 212), "Shield"),
-        new("Medal",    new Point(103, 250), "Medal"),
-    ];
+    // ── Equipment data ───────────────────────────────────────────────────────
+    // Key = positive body part, value = the worn item (id drives the icon, name the tooltip).
+    private readonly Dictionary<int, (int ItemId, string Name)> _equipped = new();
 
-    // ── Equipment data ────────────────────────────────────────────────────────
-    // Key = slot key (from EquipSlot.Key), Value = item name shown in tooltip
-    private readonly Dictionary<string, string> _equipped = new();
-
-    // ── WZ assets ─────────────────────────────────────────────────────────────
-    private readonly WzSprite? _background;
-    private readonly WzSprite? _slotBg;
+    // ── WZ assets ────────────────────────────────────────────────────────────
+    private readonly WzSprite? _background;   // outer frame + titlebar
+    private readonly WzSprite? _background2;  // inner slot-cell panel
+    private readonly WzSprite? _background3;  // labelled empty grid
+    private readonly WzSprite? _background3Dual; // variant when an overall is worn
     private readonly Button?   _btClose;
+    private readonly Button?   _btPet;
+    private readonly Button?   _btSlot;
     private readonly List<Button> _allButtons = new();
-
-    // ── State ──────────────────────────────────────────────────────────────────
-    private string? _tooltipSlot;
-    private bool  _dragging;
-    private Vector2 _dragOff;
-
-    private const int PanelW  = 172;
-    private const int PanelH  = 320;
-    private const int SlotSize = 32;
-
+    private readonly ItemIconLoader _icons;
     private readonly BuiltInFont? _font;
 
-    public EquipInventory(WzTextureLoader loader, WzPackage? ui, BuiltInFont? font)
+    // ── State ────────────────────────────────────────────────────────────────
+    private int  _tooltipPart = -1;
+    private bool _dragging;
+    private Vector2 _dragOff;
+
+    public EquipInventory(WzTextureLoader loader, WzPackage? ui, BuiltInFont? font, ItemIconLoader icons)
     {
-        _font = font;
+        _font  = font;
+        _icons = icons;
         IsVisible = false;
-        Position = new Vector2(550, 50);
+        Position  = new Vector2(560, 60);
 
-        var equip = ui?.GetItem("UIWindow.img/Equip") as WzProperty;
-        _background = equip?.Get("backgrnd") is WzCanvas bc ? loader.Load(bc) : null;
-        _slotBg     = equip?.Get("slot")     is WzCanvas sc ? loader.Load(sc) : null;
+        var character = ui?.GetItem("UIWindow2.img/Equip/character") as WzProperty;
+        _background      = character?.Get("backgrnd")       is WzCanvas a ? loader.Load(a) : null;
+        _background2     = character?.Get("backgrnd2")      is WzCanvas b ? loader.Load(b) : null;
+        _background3     = character?.Get("backgrnd3")      is WzCanvas c ? loader.Load(c) : null;
+        _background3Dual = character?.Get("backgrnd3_dual") is WzCanvas d ? loader.Load(d) : null;
 
-        var closeRoot = equip?.Get("BtClose") as WzProperty;
+        // Bottom-row buttons. Their canvas origins bake the in-window position, so they
+        // draw correctly at the window top-left. They are decorative here (no handler).
+        _btPet  = MakeButton(loader, character?.Get("BtPet")  as WzProperty);
+        _btSlot = MakeButton(loader, character?.Get("BtSlot") as WzProperty);
+
+        // Standard CUIWnd close button.
+        var closeRoot = ui?.GetItem("Basic.img/BtClose3") as WzProperty;
         if (closeRoot != null)
         {
-            _btClose = new Button(loader, closeRoot)
-            {
-                OnClick = () => IsVisible = false,
-            };
+            _btClose = new Button(loader, closeRoot) { OnClick = () => IsVisible = false };
             _allButtons.Add(_btClose);
         }
 
         LayoutButtons();
     }
 
-    // ── Public API ─────────────────────────────────────────────────────────────
+    private Button? MakeButton(WzTextureLoader loader, WzProperty? root)
+    {
+        if (root is null) return null;
+        var b = new Button(loader, root);
+        _allButtons.Add(b);
+        return b;
+    }
 
-    public void Equip(string slotKey, string itemName) => _equipped[slotKey] = itemName;
-    public void Unequip(string slotKey) => _equipped.Remove(slotKey);
+    // ── Public API ───────────────────────────────────────────────────────────
+
+    /// <summary>Show <paramref name="itemId"/> worn at the given body part. Cash slots
+    /// (bodyPart + 100) and negative wire positions fold onto the base slot.</summary>
+    public void SetEquipped(int bodyPart, int itemId, string name)
+    {
+        var part = Normalize(bodyPart);
+        if (SlotPos.ContainsKey(part))
+        {
+            _equipped[part] = (itemId, name);
+        }
+    }
+
+    public void RemoveEquipped(int bodyPart) => _equipped.Remove(Normalize(bodyPart));
+
+    public bool TryGetEquipped(int bodyPart, out int itemId, out string name)
+    {
+        if (_equipped.TryGetValue(Normalize(bodyPart), out var e))
+        {
+            itemId = e.ItemId;
+            name   = e.Name;
+            return true;
+        }
+        itemId = 0;
+        name   = string.Empty;
+        return false;
+    }
 
     public void ClearEquipped() => _equipped.Clear();
 
-    // Maps a v95 equipped body-part number to this panel's slot key.
-    private static readonly Dictionary<int, string> BodyPartToKey = new()
+    // Wire positions arrive as positive body parts; cash worn is bodyPart+100 and some
+    // ops carry the slot as a negative body part. Fold all onto the base 1..51 index.
+    private static int Normalize(int bodyPart)
     {
-        [1] = "Hat", [2] = "FaceAcc", [3] = "EyeAcc", [4] = "Earring",
-        [5] = "Top", [6] = "Bottom", [7] = "Shoes", [8] = "Gloves",
-        [9] = "Cape", [10] = "Shield", [11] = "Weapon",
-        [12] = "Ring1", [13] = "Ring2", [15] = "Ring1", [16] = "Ring2",
-        [17] = "Pendant", [49] = "Belt", [50] = "Medal",
-    };
-
-    /// <summary>Show an item worn at the given v95 body part. No-op for unmapped parts.</summary>
-    public void SetEquipped(int bodyPart, string itemName)
-    {
-        if (BodyPartToKey.TryGetValue(bodyPart, out var key))
-        {
-            _equipped[key] = itemName;
-        }
+        var p = Math.Abs(bodyPart);
+        if (p > 100) p -= 100;
+        return p;
     }
 
-    public void RemoveEquipped(int bodyPart)
-    {
-        if (BodyPartToKey.TryGetValue(bodyPart, out var key))
-        {
-            _equipped.Remove(key);
-        }
-    }
-
-    // ── Update ─────────────────────────────────────────────────────────────────
+    // ── Update ───────────────────────────────────────────────────────────────
 
     public override void Update(GameTime gt)
     {
+        if (!IsVisible) return;
         LayoutButtons();
+
         var m  = Mouse.GetState();
         var mp = new Vector2(m.X, m.Y);
         if (_dragging)
@@ -145,96 +168,100 @@ public sealed class EquipInventory : GamePanel
             else _dragging = false;
         }
 
-        // Tooltip: find hovered slot
-        _tooltipSlot = null;
-        foreach (var slot in Slots)
+        foreach (var b in _allButtons) b.Update(m.X, m.Y, m.LeftButton == ButtonState.Pressed);
+
+        // Tooltip: the worn slot under the cursor.
+        _tooltipPart = -1;
+        foreach (var (part, _) in _equipped)
         {
-            var sr = SlotRect(slot);
-            if (sr.Contains((int)mp.X, (int)mp.Y))
-            {
-                _tooltipSlot = slot.Key;
-                break;
-            }
+            if (CellRect(part).Contains(m.X, m.Y)) { _tooltipPart = part; break; }
         }
     }
 
-    // ── Draw ───────────────────────────────────────────────────────────────────
+    // ── Draw ─────────────────────────────────────────────────────────────────
 
     public override void Draw(SpriteBatch sb, Texture2D white)
     {
         if (!IsVisible) return;
 
-        var px = (int)Position.X;
-        var py = (int)Position.Y;
-
         if (_background != null)
-            _background.Draw(sb, Position + new Vector2(PanelW / 2f, PanelH / 2f));
+        {
+            // All four canvases carry origins that place them in window-content space,
+            // so each draws correctly at the window top-left.
+            _background.Draw(sb, Position);
+            _background2?.Draw(sb, Position);
+            (WearingOverall() ? _background3Dual ?? _background3 : _background3)?.Draw(sb, Position);
+        }
         else
         {
-            sb.Draw(white, new Rectangle(px, py, PanelW, PanelH), new Color(12, 14, 24, 240));
-            DrawBorder(sb, white, new Rectangle(px, py, PanelW, PanelH), new Color(60, 65, 100));
+            DrawFallbackFrame(sb, white);
         }
 
-        // Title
-        sb.Draw(white, new Rectangle(px, py, PanelW, 22), new Color(15, 18, 36));
-        _font?.Draw(sb, "Equipment", new Vector2(px + 54, py + 5), new Color(220, 200, 150));
-
-        // Slots
-        foreach (var slot in Slots) DrawSlot(sb, white, slot);
-
-        // Tooltip
-        if (_tooltipSlot != null && _font != null)
+        // Worn item icons, centred in their 32×32 cells.
+        foreach (var (part, e) in _equipped)
         {
-            var hasItem = _equipped.TryGetValue(_tooltipSlot, out var itemName);
-            var tip = hasItem ? itemName! : $"[{_tooltipSlot}]";
-            var m   = Mouse.GetState();
-            var sz  = _font.Measure(tip);
-            var tr  = new Rectangle(m.X + 12, m.Y - 18, (int)sz.X + 8, _font.LineHeight + 4);
-            sb.Draw(white, tr, new Color(0, 0, 0, 210));
-            DrawBorder(sb, white, tr, new Color(100, 100, 160));
-            _font.Draw(sb, tip, new Vector2(tr.X + 4, tr.Y + 2), Color.White);
+            if (!SlotPos.ContainsKey(part)) continue;
+            var cell = CellRect(part);
+            var icon = _icons.LoadIcon(e.ItemId);
+            if (icon != null)
+            {
+                var drawPos = new Vector2(
+                    cell.X + (Cell - icon.Width) / 2f,
+                    cell.Y + (Cell - icon.Height) / 2f) + icon.Origin;
+                icon.Draw(sb, drawPos);
+            }
+            else if (_background == null)
+            {
+                // Fallback only matters when the frame art is missing.
+                _font?.Draw(sb, e.Name.Length >= 2 ? e.Name[..2] : e.Name,
+                    new Vector2(cell.X + 7, cell.Y + 9), new Color(200, 220, 200));
+            }
         }
 
         foreach (var b in _allButtons) b.Draw(sb);
+
+        if (_tooltipPart >= 0 && _font != null && _equipped.TryGetValue(_tooltipPart, out var hov))
+        {
+            DrawTooltip(sb, white, hov.Name);
+        }
     }
 
-    private void DrawSlot(SpriteBatch sb, Texture2D white, EquipSlot slot)
+    private void DrawTooltip(SpriteBatch sb, Texture2D white, string text)
     {
-        var r = SlotRect(slot);
-        var hasItem = _equipped.ContainsKey(slot.Key);
+        var m  = Mouse.GetState();
+        var sz = _font!.Measure(text);
+        var tr = new Rectangle(m.X + 14, m.Y - 18, (int)sz.X + 10, _font.LineHeight + 6);
+        sb.Draw(white, tr, new Color(0, 0, 0, 215));
+        DrawBorder(sb, white, tr, new Color(120, 110, 70));
+        _font.Draw(sb, text, new Vector2(tr.X + 5, tr.Y + 3), Color.White);
+    }
 
-        if (_slotBg != null)
-            _slotBg.Draw(sb, new Vector2(r.X + SlotSize / 2f, r.Y + SlotSize / 2f));
-        else
+    private void DrawFallbackFrame(SpriteBatch sb, Texture2D white)
+    {
+        var r = new Rectangle((int)Position.X, (int)Position.Y, PanelW, PanelH);
+        sb.Draw(white, r, new Color(12, 14, 24, 240));
+        DrawBorder(sb, white, r, new Color(60, 65, 100));
+        sb.Draw(white, new Rectangle(r.X, r.Y, PanelW, TitleH), new Color(15, 18, 36));
+        _font?.Draw(sb, "EQUIPMENT", new Vector2(r.X + 12, r.Y + 4), new Color(220, 200, 150));
+        foreach (var (_, p) in SlotPos)
         {
-            sb.Draw(white, r, hasItem ? new Color(30, 45, 35) : new Color(18, 20, 32));
-            DrawBorder(sb, white, r, hasItem ? new Color(60, 110, 70) : new Color(45, 50, 75));
-        }
-
-        if (hasItem && _equipped.TryGetValue(slot.Key, out var name))
-        {
-            // Item icon placeholder (first 2 chars of name)
-            _font?.Draw(sb, name.Length >= 2 ? name[..2] : name,
-                new Vector2(r.X + 7, r.Y + 9), new Color(200, 220, 200));
-        }
-        else
-        {
-            // Slot label (tiny, bottom of slot)
-            if (_font != null)
-            {
-                var lbl = slot.Label.Length > 4 ? slot.Label[..4] : slot.Label;
-                _font.Draw(sb, lbl, new Vector2(r.X + 1, r.Y + 20), new Color(70, 75, 100));
-            }
+            var cell = new Rectangle((int)Position.X + p.X, (int)Position.Y + p.Y, Cell, Cell);
+            sb.Draw(white, cell, new Color(18, 20, 32));
+            DrawBorder(sb, white, cell, new Color(45, 50, 75));
         }
     }
 
-    private Rectangle SlotRect(EquipSlot slot) =>
-        new Rectangle(
-            (int)Position.X + slot.Offset.X,
-            (int)Position.Y + slot.Offset.Y,
-            SlotSize, SlotSize);
+    // An overall (longcoat, category 105) occupies the Clothes slot and merges top+bottom.
+    private bool WearingOverall() =>
+        _equipped.TryGetValue(5, out var top) && top.ItemId / 10000 == 105;
 
-    // ── Input ──────────────────────────────────────────────────────────────────
+    private Rectangle CellRect(int part)
+    {
+        var p = SlotPos[part];
+        return new Rectangle((int)Position.X + p.X, (int)Position.Y + p.Y, Cell, Cell);
+    }
+
+    // ── Input ────────────────────────────────────────────────────────────────
 
     public override bool HandleMouseButton(int x, int y, bool down)
     {
@@ -242,7 +269,7 @@ public sealed class EquipInventory : GamePanel
         foreach (var b in _allButtons)
             if (b.HandleMouseButton(x, y, down)) return true;
 
-        var titleBar = new Rectangle((int)Position.X, (int)Position.Y, PanelW, 22);
+        var titleBar = new Rectangle((int)Position.X, (int)Position.Y, PanelW, TitleH);
         if (down && titleBar.Contains(x, y))
         {
             _dragging = true;
@@ -258,11 +285,14 @@ public sealed class EquipInventory : GamePanel
         return false;
     }
 
-    // ── Helpers ────────────────────────────────────────────────────────────────
+    // ── Helpers ──────────────────────────────────────────────────────────────
 
     private void LayoutButtons()
     {
-        if (_btClose != null) _btClose.Position = Position + new Vector2(PanelW - 18, 4);
+        // BtPet / BtSlot origins bake their content position, so anchor them to the window top-left.
+        if (_btPet  != null) _btPet.Position  = Position;
+        if (_btSlot != null) _btSlot.Position = Position;
+        if (_btClose != null) _btClose.Position = Position + new Vector2(162, 6);
     }
 
     private static void DrawBorder(SpriteBatch sb, Texture2D white, Rectangle r, Color c)

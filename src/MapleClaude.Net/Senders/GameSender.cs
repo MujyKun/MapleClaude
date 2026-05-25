@@ -105,20 +105,41 @@ public static class GameSender
         return p;
     }
 
+    // UserAbilityUpRequest(98): int update_time, int dwFlag (the single Stat flag).
+    // Mirrors UserHandler.handleUserAbilityUpRequest.
     public static OutPacket UserAbilityUp(int statType)
     {
         var p = OutPacket.Of(InHeader.UserAbilityUpRequest);
-        p.WriteInt(0);   // tickCount
+        p.WriteInt(0);   // update_time
         p.WriteInt(statType);
         return p;
     }
 
+    // UserAbilityMassUpRequest(99): int update_time, int size, size×(int dwStatFlag, int nValue).
+    // Used by the Stat window's auto-assign. Mirrors UserHandler.handleUserAbilityMassUpRequest.
+    public static OutPacket UserAbilityMassUp(IReadOnlyList<(int statFlag, int value)> entries)
+    {
+        var p = OutPacket.Of(InHeader.UserAbilityMassUpRequest);
+        p.WriteInt(0);                 // update_time
+        p.WriteInt(entries.Count);     // size
+        foreach (var (flag, value) in entries)
+        {
+            p.WriteInt(flag);
+            p.WriteInt(value);
+        }
+        return p;
+    }
+
+    /// <summary>v95 <c>Stat</c> ability-up flags (the <c>dwFlag</c> sent by the +
+    /// buttons). Values match the client's <c>CUIStat::OnButtonClicked</c>.</summary>
     public static class MapleStat
     {
-        public const int Str = 0x40;
-        public const int Dex = 0x80;
-        public const int Int = 0x200;
-        public const int Luk = 0x400;
+        public const int Str   = 0x40;
+        public const int Dex   = 0x80;
+        public const int Int   = 0x100;
+        public const int Luk   = 0x200;
+        public const int MaxHp = 0x800;
+        public const int MaxMp = 0x2000;
     }
 
     // ── Field travel / migration ─────────────────────────────────────────────────

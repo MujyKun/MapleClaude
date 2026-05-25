@@ -70,6 +70,7 @@ public enum InHeader : short
     UserStatChangeItemUseRequest = 78,
     UserPortalScrollUseRequest = 92,
     UserAbilityUpRequest = 98,
+    UserAbilityMassUpRequest = 99,
     UserSkillUpRequest = 102,
     UserSkillUseRequest = 103,
     UserSkillCancelRequest = 104,
