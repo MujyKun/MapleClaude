@@ -115,7 +115,8 @@ public sealed class ItemInventory : GamePanel
     private int _dragFromTab;
     private int _mouseX, _mouseY;
 
-    public ItemInventory(WzTextureLoader loader, WzPackage? ui, BuiltInFont? font, ItemIconLoader? icons = null)
+    public ItemInventory(WzTextureLoader loader, WzPackage? ui, BuiltInFont? font,
+        ItemIconLoader? icons = null, Func<int, string?>? itemDesc = null)
     {
         _loader = loader;
         _font   = font;
@@ -163,10 +164,14 @@ public sealed class ItemInventory : GamePanel
         if (ui?.GetItem("Basic.img/BtClose3") is WzProperty closeRoot)
             _btClose = new Button(_loader, closeRoot) { OnClick = () => IsVisible = false };
 
-        if (font != null && icons != null) _tooltip = new ItemTooltip(font, icons);
+        if (font != null && icons != null) _tooltip = new ItemTooltip(font, icons, itemDesc);
 
         LayoutButtons();
     }
+
+    /// <summary>Push the player's requirement stats to the tooltip so unmet reqs flag red.</summary>
+    public void SetPlayerStats(int level, int str, int dex, int intt, int luk, int jobId) =>
+        _tooltip?.SetPlayer(level, str, dex, intt, luk, jobId);
 
     // ── Public API (preserved for GameStage / Shop) ──────────────────────────────
 

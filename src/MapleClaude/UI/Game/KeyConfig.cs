@@ -54,7 +54,7 @@ public sealed class KeyConfig : GamePanel
         AllianceChat      = 23,
         BuddyChat         = 24,
         ManageLegion      = 25,
-        Medals            = 26,
+        Family            = 26,   // v95 menu id 26 (keyconfig icon "FAMILY TAB"); default key F
         BossParty         = 27,
         CharInfo          = 44,
         ChangeChannel     = 45,
@@ -181,7 +181,7 @@ public sealed class KeyConfig : GamePanel
             case KeyAction.MoveRight: return kb.IsKeyDown(Keys.Right);
             case KeyAction.Jump:
                 // Up is reserved for ladders/ropes + portals; jump is Left/Right Alt (v95 default) or the bound key.
-                return kb.IsKeyDown(Keys.LeftAlt) || kb.IsKeyDown(Keys.RightAlt)
+                return kb.IsKeyDown(Keys.LeftAlt) || kb.IsKeyDown(Keys.RightAlt) || RightModDown(Keys.RightAlt)
                     || AnyHeld(kb, FuncKeyType.BasicAction, (int)KeyAction.Jump);
             default:
                 if (!TryActionToFuncKey(action, out var fk)) return false;
@@ -198,7 +198,9 @@ public sealed class KeyConfig : GamePanel
             // The map only ever stores the LEFT modifier scancode (right mods fold to
             // left at bind/lookup, per CUIKeyConfig::GetShortCutIndexByPos). So a binding
             // on L-Ctrl/Shift/Alt must also fire when the matching RIGHT key is held —
-            // e.g. Attack on L-Ctrl works from R-Ctrl too.
+            // e.g. Attack on L-Ctrl works from R-Ctrl too. MonoGame's polled keyboard does
+            // NOT surface the right modifiers (same reason Right-Alt needs the WndProc hook),
+            // so query the physical key directly via Win32 GetAsyncKeyState.
             var sibling = sc switch
             {
                 KeyConfigLayout.ScLCtrl  => (Keys?)Keys.RightControl,
@@ -206,10 +208,25 @@ public sealed class KeyConfig : GamePanel
                 KeyConfigLayout.ScLAlt   => Keys.RightAlt,
                 _ => null,
             };
-            if (sibling is { } rk && kb.IsKeyDown(rk)) return true;
+            if (sibling is { } rk && RightModDown(rk)) return true;
         }
         return false;
     }
+
+    // VK_RSHIFT=0xA1, VK_RCONTROL=0xA3, VK_RMENU=0xA5. GetAsyncKeyState's high bit = key currently
+    // physically down. Used because MonoGame's Keyboard.GetState() doesn't report the right modifiers.
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern short GetAsyncKeyState(int vKey);
+
+    /// <summary>True when the given RIGHT modifier is physically held (focus-agnostic; callers gate on
+    /// window focus). Returns false for any non-right-modifier key.</summary>
+    public static bool RightModDown(Keys k) => k switch
+    {
+        Keys.RightControl => (GetAsyncKeyState(0xA3) & 0x8000) != 0,
+        Keys.RightShift   => (GetAsyncKeyState(0xA1) & 0x8000) != 0,
+        Keys.RightAlt     => (GetAsyncKeyState(0xA5) & 0x8000) != 0,
+        _ => false,
+    };
 
     /// <summary>Snapshot the 89-slot map (for disk persistence).</summary>
     public FuncKeyMapped[] ExportMap() => (FuncKeyMapped[])_map.Clone();

@@ -85,11 +85,12 @@ public sealed class EquipInventory : GamePanel
     /// (CUIEquip::OnMouseButton → CDraggableItem::GetOffEquipItem).</summary>
     public Action<int>? OnUnequip { get; set; }
 
-    public EquipInventory(WzTextureLoader loader, WzPackage? ui, BuiltInFont? font, ItemIconLoader icons)
+    public EquipInventory(WzTextureLoader loader, WzPackage? ui, BuiltInFont? font, ItemIconLoader icons,
+        Func<int, string?>? itemDesc = null)
     {
         _font  = font;
         _icons = icons;
-        if (font != null) _tooltip = new ItemTooltip(font, icons);
+        if (font != null) _tooltip = new ItemTooltip(font, icons, itemDesc);
         IsVisible = false;
         Position  = new Vector2(560, 60);
 
@@ -244,6 +245,10 @@ public sealed class EquipInventory : GamePanel
         _viewW = viewWidth;
         _viewH = viewHeight;
     }
+
+    /// <summary>Push the player's requirement stats to the tooltip so unmet reqs flag red.</summary>
+    public void SetPlayerStats(int level, int str, int dex, int intt, int luk, int jobId) =>
+        _tooltip?.SetPlayer(level, str, dex, intt, luk, jobId);
 
     private void DrawTooltip(SpriteBatch sb, Texture2D white, string text)
     {
