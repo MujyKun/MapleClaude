@@ -359,7 +359,6 @@ public sealed class GameStage : Stage
         _keyConfig.OnBindingsChanged += SaveSettings;
         _keyConfig.OnSaveToServer += SendFuncKeyMapModified;
         _optionMenu.OnSettingsChanged += () => { SaveSettings(); ApplyAudioVolumes(); ApplyResolution(_optionMenu.ResW, _optionMenu.ResH); };
-        _optionMenu.OnResolutionChanged += () => ApplyResolution(_optionMenu.ResW, _optionMenu.ResH);
         _panels.Add(_charInfo);
         _panels.Add(_npcTalk);
         _panels.Add(_shop);
@@ -974,6 +973,7 @@ public sealed class GameStage : Stage
         if (args.Look is not null && _player is not null && _charRenderer is not null)
         {
             _player.SetAvatar(_charRenderer, args.Look);
+            _charInfo?.SetAvatar(_charRenderer, args.Look);   // profile shows the real avatar
         }
         // Ask the server for our guild roster once (it isn't pushed on login).
         if (!_guildLoadSent && Game.Session.IsConnected)
@@ -2057,6 +2057,8 @@ public sealed class GameStage : Stage
             _charInfo.CharName = _myName;
             _charInfo.Level    = stats.Level;
             _charInfo.Job      = JobName(stats.JobId);
+            _charInfo.Fame     = stats.Fame;
+            _charInfo.Guild    = stats.Guild;
         }
         if (_skill != null) _skill.SP = stats.SP;
     }
