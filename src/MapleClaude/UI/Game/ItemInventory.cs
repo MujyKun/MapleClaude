@@ -116,7 +116,8 @@ public sealed class ItemInventory : GamePanel
     private int _mouseX, _mouseY;
 
     public ItemInventory(WzTextureLoader loader, WzPackage? ui, BuiltInFont? font,
-        ItemIconLoader? icons = null, Func<int, string?>? itemDesc = null)
+        ItemIconLoader? icons = null, Func<int, string?>? itemDesc = null, BuiltInFont? tipFont = null,
+        BuiltInFont? tipTabFont = null)
     {
         _loader = loader;
         _font   = font;
@@ -164,7 +165,7 @@ public sealed class ItemInventory : GamePanel
         if (ui?.GetItem("Basic.img/BtClose3") is WzProperty closeRoot)
             _btClose = new Button(_loader, closeRoot) { OnClick = () => IsVisible = false };
 
-        if (font != null && icons != null) _tooltip = new ItemTooltip(font, icons, itemDesc);
+        if (font != null && icons != null) _tooltip = new ItemTooltip(tipFont ?? font, icons, itemDesc, tipTabFont);
 
         LayoutButtons();
     }
@@ -252,6 +253,18 @@ public sealed class ItemInventory : GamePanel
 
     /// <summary>Raised when an item is dragged to a different slot in the same tab: (tab, from, to).</summary>
     public Action<int, int, int>? OnMoveItem { get; set; }
+
+    /// <summary>Raised when a held item is dropped outside the window — drop it to the ground: (tab, slot).</summary>
+    public Action<int, int>? OnDropToGround { get; set; }
+
+    /// <summary>Drop the currently-held item to the ground (called by GameStage when the drop lands
+    /// outside the window). The item stays until the server confirms removal via InventoryOperation.</summary>
+    public void DropHeldToGround()
+    {
+        if (!_dragActive) return;
+        OnDropToGround?.Invoke(_dragFromTab, _dragFromSlot);
+        CancelDrag();
+    }
 
     // ── Layout ───────────────────────────────────────────────────────────────────
 
@@ -343,16 +356,8 @@ public sealed class ItemInventory : GamePanel
         var down = m.LeftButton == ButtonState.Pressed;
         foreach (var b in VisibleButtons()) b.Update(m.X, m.Y, down);
 
-        // Finalize a picked-up item on mouse-up: drop onto the slot under the cursor (same tab).
-        if (_dragActive && !down)
-        {
-            var (_, toPos) = HitTest(m.X, m.Y);
-            if (toPos > 0 && toPos != _dragFromSlot)
-                OnMoveItem?.Invoke(_dragFromTab, _dragFromSlot, toPos);
-            _dragActive = false;
-            _dragItem = null;
-            _dragFromSlot = -1;
-        }
+        // Drag is click-to-grab / click-to-drop (resolved in HandleMouseButton), so nothing happens on
+        // mouse-up — the held item keeps following the cursor as a ghost until the next click.
 
         (_hoverItem, _hoverPos) = HitTest(m.X, m.Y);
     }
@@ -413,8 +418,7 @@ public sealed class ItemInventory : GamePanel
         foreach (var (pos, it) in _tabs[_activeTab])
         {
             if (!CellForPosition(pos, out var cell)) continue;
-            // The picked-up item is drawn on the cursor, not in its home slot.
-            if (_dragActive && _dragFromTab == _activeTab && pos == _dragFromSlot) continue;
+            // A picked-up item stays drawn in its home slot — only a ghost copy follows the cursor.
             DrawItemIcon(sb, white, it, cell);
             if (it.Grade is > 0 and < 6 && _quality[it.Grade] != null)
                 DrawAt(sb, _quality[it.Grade], cell + new Vector2(1, 1));
@@ -453,15 +457,16 @@ public sealed class ItemInventory : GamePanel
                 new Color(40, 40, 40));
         }
 
-        // Ghost: the picked-up item's icon follows the cursor (so it reads as "held").
+        // Ghost: a translucent copy of the held item's icon follows the cursor (sitting just below the
+        // closed-hand "grab" cursor). The real item stays put in its slot until the drop click lands.
         if (_dragActive && _dragItem != null)
         {
             var icon = ResolveIcon(_dragItem);
             if (icon != null)
                 icon.Draw(sb, new Vector2(_mouseX - icon.Width / 2f, _mouseY - icon.Height / 2f) + icon.Origin,
-                    Microsoft.Xna.Framework.Graphics.SpriteEffects.None, new Color(255, 255, 255, 185));
+                    Microsoft.Xna.Framework.Graphics.SpriteEffects.None, new Color(255, 255, 255, 130));
             else
-                sb.Draw(white, new Rectangle(_mouseX - 14, _mouseY - 14, 28, 28), new Color(80, 90, 120, 170));
+                sb.Draw(white, new Rectangle(_mouseX - 14, _mouseY - 14, 28, 28), new Color(80, 90, 120, 120));
         }
         else if (_hoverItem != null)
         {
@@ -531,8 +536,16 @@ public sealed class ItemInventory : GamePanel
 
     // ── Input ────────────────────────────────────────────────────────────────────
 
-    private double _lastClickTime;
-    private InvItem? _lastClickItem;
+    private double _pickupTime;
+
+    /// <summary>True while an item is picked up onto the cursor (ghost-drag in progress). GameStage
+    /// reads this to switch the cursor to the closed-hand "grab" sprite. Gated on visibility so hiding
+    /// the window mid-drag can't leave the cursor stuck as a grab hand (the item never left its slot).</summary>
+    public bool IsDragging => _dragActive && IsVisible;
+
+    /// <summary>True when the point is inside this (visible) window — used to detect an equip dropped
+    /// here to unequip it.</summary>
+    public bool ContainsPoint(int x, int y) => IsVisible && WindowRect.Contains(x, y);
 
     public override bool HandleMouseButton(int x, int y, bool down)
     {
@@ -544,33 +557,42 @@ public sealed class ItemInventory : GamePanel
         if (down)
         {
             // Close hotspot (top-right; the X is baked into the background art).
-            if (CloseRect.Contains(x, y)) { IsVisible = false; return true; }
+            if (CloseRect.Contains(x, y)) { IsVisible = false; CancelDrag(); return true; }
+
+            // If an item is already held on the cursor, this click resolves it (drop / move / activate).
+            if (_dragActive)
+            {
+                // Switching tabs while holding is allowed, so the item can be dropped into another tab.
+                for (var i = 0; i < 5; i++)
+                    if (TabRect(i).Contains(x, y)) { _activeTab = i; return true; }
+
+                var (_, overPos) = HitTest(x, y);
+                var now = Environment.TickCount64 / 1000.0;
+                var sameSlot = overPos == _dragFromSlot && _activeTab == _dragFromTab;
+                if (sameSlot && now - _pickupTime < 0.4)
+                    // A quick second click back on the source slot reads as a double-click → equip/use.
+                    OnItemActivate?.Invoke(_dragItem!.Tab, _dragItem.Slot, _dragItem.Id);
+                else if (overPos > 0 && !sameSlot)
+                    OnMoveItem?.Invoke(_dragFromTab, _dragFromSlot, overPos);
+                // Same slot (slow click), an empty cell, or outside → just put it back.
+                CancelDrag();
+                return true;
+            }
 
             // Tab switch.
             for (var i = 0; i < 5; i++)
                 if (TabRect(i).Contains(x, y)) { _activeTab = i; return true; }
 
-            // Slot click: a double-click activates (equip/use); a single click picks the item up
-            // onto the cursor (ghost) so it can be dragged to another slot (dropped in Update).
+            // Slot click: pick the item up onto the cursor (a ghost copy follows it; the real item stays
+            // in its slot). It is dropped/moved on the next click; a fast click back on it equips/uses it.
             var (hit, hitPos) = HitTest(x, y);
             if (hit != null)
             {
-                var now = Environment.TickCount64 / 1000.0;
-                if (ReferenceEquals(hit, _lastClickItem) && now - _lastClickTime < 0.4)
-                {
-                    OnItemActivate?.Invoke(hit.Tab, hit.Slot, hit.Id);
-                    _lastClickItem = null;
-                    _dragActive = false;
-                }
-                else
-                {
-                    _lastClickItem = hit;
-                    _lastClickTime = now;
-                    _dragActive = true;
-                    _dragItem = hit;
-                    _dragFromSlot = hitPos;
-                    _dragFromTab = _activeTab;
-                }
+                _dragActive   = true;
+                _dragItem     = hit;
+                _dragFromSlot = hitPos;
+                _dragFromTab  = _activeTab;
+                _pickupTime   = Environment.TickCount64 / 1000.0;
                 return true;
             }
 
@@ -584,6 +606,13 @@ public sealed class ItemInventory : GamePanel
         }
 
         return WindowRect.Contains(x, y);
+    }
+
+    private void CancelDrag()
+    {
+        _dragActive   = false;
+        _dragItem     = null;
+        _dragFromSlot = -1;
     }
 
     public override bool OnKeyPress(Keys key)

@@ -76,21 +76,33 @@ public sealed class EquipInventory : GamePanel
 
     // ── State ────────────────────────────────────────────────────────────────
     private int  _tooltipPart = -1;
-    private bool _dragging;
+    private bool _dragging;            // window-move drag
     private Vector2 _dragOff;
-    private int    _lastClickPart = -1;
-    private double _lastClickTime;
 
-    /// <summary>Raised on a double-click of a worn slot — the body part to unequip
-    /// (CUIEquip::OnMouseButton → CDraggableItem::GetOffEquipItem).</summary>
+    // Item ghost-drag (same model as ItemInventory): a worn item is "picked up" onto the cursor.
+    private bool   _dragActive;
+    private int    _dragPart = -1;
+    private int    _dragItemId;
+    private double _pickupTime;
+    private int    _mouseX, _mouseY;
+
+    /// <summary>True while a worn item is held on the cursor (ghost-drag). GameStage reads this to show
+    /// the closed-hand grab cursor and to route the drop click (→ unequip when dropped on the inventory).</summary>
+    public bool IsDragging => _dragActive && IsVisible;
+
+    /// <summary>Raised when a worn slot is unequipped — the body part (CUIEquip::OnMouseButton →
+    /// CDraggableItem::GetOffEquipItem). Fired by a fast double-click or a ghost-drag onto the inventory.</summary>
     public Action<int>? OnUnequip { get; set; }
 
+    /// <summary>Raised when a held worn item is dropped outside both windows — drop it to the ground (body part).</summary>
+    public Action<int>? OnDropToGround { get; set; }
+
     public EquipInventory(WzTextureLoader loader, WzPackage? ui, BuiltInFont? font, ItemIconLoader icons,
-        Func<int, string?>? itemDesc = null)
+        Func<int, string?>? itemDesc = null, BuiltInFont? tipFont = null, BuiltInFont? tipTabFont = null)
     {
         _font  = font;
         _icons = icons;
-        if (font != null) _tooltip = new ItemTooltip(font, icons, itemDesc);
+        if (font != null) _tooltip = new ItemTooltip(tipFont ?? font, icons, itemDesc, tipTabFont);
         IsVisible = false;
         Position  = new Vector2(560, 60);
 
@@ -172,6 +184,7 @@ public sealed class EquipInventory : GamePanel
 
         var m  = Mouse.GetState();
         var mp = new Vector2(m.X, m.Y);
+        _mouseX = m.X; _mouseY = m.Y;
         if (_dragging)
         {
             if (m.LeftButton == ButtonState.Pressed) Position = mp - _dragOff;
@@ -180,12 +193,13 @@ public sealed class EquipInventory : GamePanel
 
         foreach (var b in _allButtons) b.Update(m.X, m.Y, m.LeftButton == ButtonState.Pressed);
 
-        // Tooltip: the worn slot under the cursor.
+        // Tooltip: the worn slot under the cursor (suppressed while an item is held on the cursor).
         _tooltipPart = -1;
-        foreach (var (part, _) in _equipped)
-        {
-            if (CellRect(part).Contains(m.X, m.Y)) { _tooltipPart = part; break; }
-        }
+        if (!_dragActive)
+            foreach (var (part, _) in _equipped)
+            {
+                if (CellRect(part).Contains(m.X, m.Y)) { _tooltipPart = part; break; }
+            }
     }
 
     // ── Draw ─────────────────────────────────────────────────────────────────
@@ -233,7 +247,18 @@ public sealed class EquipInventory : GamePanel
 
         foreach (var b in _allButtons) b.Draw(sb);
 
-        if (_tooltipPart >= 0 && _equipped.TryGetValue(_tooltipPart, out var hov))
+        // Ghost: a translucent copy of the held item follows the cursor (the real item stays in its
+        // slot until the drop click lands), sitting just below the closed-hand grab cursor.
+        if (_dragActive)
+        {
+            var ghost = _icons.LoadIcon(_dragItemId);
+            if (ghost != null)
+                ghost.Draw(sb, new Vector2(_mouseX - ghost.Width / 2f, _mouseY - ghost.Height / 2f) + ghost.Origin,
+                    SpriteEffects.None, new Color(255, 255, 255, 130));
+            else
+                sb.Draw(white, new Rectangle(_mouseX - 14, _mouseY - 14, 28, 28), new Color(80, 90, 120, 120));
+        }
+        else if (_tooltipPart >= 0 && _equipped.TryGetValue(_tooltipPart, out var hov))
         {
             var m = Mouse.GetState();
             if (_tooltip != null)
@@ -294,21 +319,20 @@ public sealed class EquipInventory : GamePanel
     {
         if (!IsVisible) return false;
         foreach (var b in _allButtons)
-            if (b.HandleMouseButton(x, y, down)) return true;
+            if (b.HandleMouseButton(x, y, down)) { CancelDrag(); return true; }
 
-        // Double-click a worn slot → unequip it (the item moves to the first free Equip-inventory slot).
-        if (down)
+        // Single click a worn slot → pick the item up onto the cursor (a ghost copy follows it; the real
+        // item stays in its slot). The drop is resolved by GameStage via ResolveDrop (drop onto the item
+        // inventory, or a fast click back on the slot, unequips it; anywhere else puts it back).
+        if (down && !_dragActive)
         {
-            foreach (var (part, _) in _equipped)
+            foreach (var (part, e) in _equipped)
             {
                 if (!CellRect(part).Contains(x, y)) continue;
-                var now = Environment.TickCount64 / 1000.0;
-                if (part == _lastClickPart && now - _lastClickTime < 0.4)
-                {
-                    OnUnequip?.Invoke(part);
-                    _lastClickPart = -1;
-                }
-                else { _lastClickPart = part; _lastClickTime = now; }
+                _dragActive = true;
+                _dragPart   = part;
+                _dragItemId = e.ItemId;
+                _pickupTime = Environment.TickCount64 / 1000.0;
                 return true;
             }
         }
@@ -321,6 +345,29 @@ public sealed class EquipInventory : GamePanel
             return true;
         }
         return new Rectangle((int)Position.X, (int)Position.Y, PanelW, PanelH).Contains(x, y);
+    }
+
+    /// <summary>Resolve a held equip on the next click. Dropping it onto the item inventory (or a fast
+    /// click back on its own slot — the double-click unequip) takes it off; dropping it outside both
+    /// windows drops it to the ground; dropping elsewhere in this window puts it back.</summary>
+    public void ResolveDrop(int x, int y, bool overItemInventory)
+    {
+        if (!_dragActive) return;
+        var onSource = _dragPart >= 0 && SlotPos.ContainsKey(_dragPart) && CellRect(_dragPart).Contains(x, y);
+        var fast = Environment.TickCount64 / 1000.0 - _pickupTime < 0.4;
+        var inWindow = new Rectangle((int)Position.X, (int)Position.Y, PanelW, PanelH).Contains(x, y);
+        if (overItemInventory || (onSource && fast))
+            OnUnequip?.Invoke(_dragPart);
+        else if (!overItemInventory && !inWindow)
+            OnDropToGround?.Invoke(_dragPart);   // dropped outside both windows → drop to the ground
+        CancelDrag();
+    }
+
+    private void CancelDrag()
+    {
+        _dragActive = false;
+        _dragPart   = -1;
+        _dragItemId = 0;
     }
 
     public override bool OnKeyPress(Keys key)

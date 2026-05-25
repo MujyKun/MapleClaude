@@ -204,6 +204,12 @@ public sealed class BuiltInFont : IDisposable
     /// <summary>Draw at a uniform scale — for small labels (e.g. the char-creation row names)
     /// where the full-size UI font overflows the space between the cyclers.</summary>
     public void Draw(SpriteBatch sb, string s, Vector2 pos, Color color, float scale)
+        => Draw(sb, s, pos, color, scale, 0);
+
+    /// <summary>Draw at a uniform scale with per-glyph letter-spacing adjustment. Each glyph's advance
+    /// already carries +2px of padding (see ctor); pass a negative <paramref name="tracking"/> (e.g. -2)
+    /// to tighten the spacing for compact labels like the tooltip's job-requirement tabs.</summary>
+    public void Draw(SpriteBatch sb, string s, Vector2 pos, Color color, float scale, int tracking)
     {
         if (string.IsNullOrEmpty(s))
         {
@@ -218,7 +224,7 @@ public sealed class BuiltInFont : IDisposable
             {
                 sb.Draw(info.Texture, new Vector2(x, y), info.Source, color, 0f, Vector2.Zero, scale, SpriteEffects.None, 0f);
             }
-            x += info.Width * scale;
+            x += info.Width * scale + tracking;
         }
     }
 

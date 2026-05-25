@@ -21,6 +21,7 @@ namespace MapleClaude.UI.Game;
 public sealed class ItemTooltip
 {
     private readonly BuiltInFont _font;
+    private readonly BuiltInFont _tabFont;   // tiny font for the job-requirement tabs (drawn at scale 1.0)
     private readonly ItemIconLoader _icons;
     private readonly Func<int, string?>? _descOf;
 
@@ -37,36 +38,49 @@ public sealed class ItemTooltip
     private static readonly Color IdColor   = new(150, 165, 195);
     private static readonly Color DescColor = new(195, 205, 225);
     private static readonly Color DividerC  = new(90, 110, 150, 160);
-    private static readonly Color PillOn    = new(200, 52, 52);
-    private static readonly Color PillOff   = new(64, 46, 52);
-    private static readonly Color PillTxtOn = Color.White;
-    private static readonly Color PillTxtOff = new(135, 120, 122);
+    private static readonly Color PillOn    = new(196, 60, 60);    // job tab: class can wear the item
+    private static readonly Color PillOff   = new(58, 44, 50);     // job tab: greyed-out
+    private static readonly Color PillTxtOn = new(250, 240, 240);
+    private static readonly Color PillTxtOff = new(120, 108, 110);
 
-    private static readonly string[] JobPills = { "BEGINNER", "WARRIOR", "MAGICIAN", "BOWMAN", "THIEF", "PIRATE" };
+    // Job-class labels for the requirement tabs (drawn very small, the native uses small icons).
+    private static readonly string[] JobNames = { "BEGINNER", "WARRIOR", "MAGICIAN", "BOWMAN", "THIEF", "PIRATE" };
 
-    private int _pLevel, _pStr, _pDex, _pInt, _pLuk, _pJob;
+    private int _pLevel, _pStr, _pDex, _pInt, _pLuk;
 
-    public ItemTooltip(BuiltInFont font, ItemIconLoader icons, Func<int, string?>? descOf = null)
+    public ItemTooltip(BuiltInFont font, ItemIconLoader icons, Func<int, string?>? descOf = null,
+        BuiltInFont? tabFont = null)
     {
         _font = font;
+        _tabFont = tabFont ?? font;
         _icons = icons;
         _descOf = descOf;
     }
 
+    // jobId is accepted for call-site symmetry with the other stats; the job tabs key off the item's
+    // own requirement mask, not the player's class, so it isn't stored.
     public void SetPlayer(int level, int str, int dex, int intt, int luk, int jobId)
     {
-        _pLevel = level; _pStr = str; _pDex = dex; _pInt = intt; _pLuk = luk; _pJob = jobId;
+        _ = jobId;
+        _pLevel = level; _pStr = str; _pDex = dex; _pInt = intt; _pLuk = luk;
     }
 
     public void Draw(SpriteBatch sb, Texture2D white, int itemId, string name, int grade, int quantity,
         int mouseX, int mouseY, int viewW, int viewH)
     {
         var lh = _font.LineHeight;
+        var lineStep = Math.Max(lh - 3, 8);     // tight row spacing (less gap above/below each line)
         var attr = _icons.LoadAttr(itemId);
         var isEquip = attr is { IsEquip: true } || itemId / 1_000_000 == 1;
-        const int pad = 8, iconBox = 34, iconGap = 8, pillGap = 3, pillPad = 4;
+        const int pad = 7, iconBox = 64, iconGap = 8;   // large preview icon
+        // Job-tab boxes hug the text: the font's LineHeight bakes in leading/descent the all-caps labels
+        // don't use, so the box is shrunk and the glyph cell is centered within it (near-zero top/bottom gap).
+        var tabH = Math.Max(8, _tabFont.LineHeight - 4);
+        var tabTextY = (tabH - _tabFont.LineHeight) / 2;   // negative: lifts the glyph cell into the short box
 
-        // ── Requirement rows (equips): label + value text + unmet flag ─────────────
+        // ── Requirement rows (equips): label + value text + unmet flag. Drawn in two columns to the
+        // right of the icon so the block is short and fills the otherwise-empty top-right space. ─────
+        var mask = attr?.ReqJob ?? 0;
         var reqs = new List<(string label, string val, bool bad)>();
         if (isEquip)
         {
@@ -80,12 +94,12 @@ public sealed class ItemTooltip
             reqs.Add(("ITEM LEV", "-", false));
             reqs.Add(("ITEM EXP", "-", false));
         }
-
-        // ── Job pills (equips) ─────────────────────────────────────────────────────
-        var mask = attr?.ReqJob ?? 0;
+        // Job-requirement tabs: which classes can wear the item (mask 1 War 2 Mag 4 Bow 8 Thf 16 Pir;
+        // 0 = any). Index 0 is Beginner (only "any" items).
         var jobOk = new bool[6];
-        if (mask <= 0) { for (var i = 0; i < 6; i++) jobOk[i] = true; }
+        if (mask <= 0) for (var i = 0; i < 6; i++) jobOk[i] = true;
         else { jobOk[1] = (mask & 1) != 0; jobOk[2] = (mask & 2) != 0; jobOk[3] = (mask & 4) != 0; jobOk[4] = (mask & 8) != 0; jobOk[5] = (mask & 16) != 0; }
+        var reqRows = reqs.Count;   // single column: all reqs stacked on the left, beside the icon
 
         // ── Bulleted info lines ────────────────────────────────────────────────────
         var info = new List<(string text, Color c)>();
@@ -102,9 +116,9 @@ public sealed class ItemTooltip
                 AddStat(info, "MaxHP", attr.IncMhp); AddStat(info, "MaxMP", attr.IncMmp);
                 AddStat(info, "Accuracy", attr.IncAcc); AddStat(info, "Avoidability", attr.IncEva);
                 AddStat(info, "Speed", attr.IncSpeed); AddStat(info, "Jump", attr.IncJump);
-                if (attr.AttackSpeed > 0) info.Add(($"· ATTACK SPEED : {SpeedLabel(attr.AttackSpeed)}", StatColor));
-                info.Add(($"· NUMBER OF UPGRADES AVAILABLE : {attr.Upgrades}", InfoColor));
-                info.Add(("· NUMBER OF VICIOUS' HAMMER APPLIED : 0", InfoColor));
+                if (attr.AttackSpeed > 0) info.Add(($"· ATK SPEED : {SpeedLabel(attr.AttackSpeed)}", StatColor));
+                info.Add(($"· UPGRADES AVAILABLE : {attr.Upgrades}", InfoColor));
+                info.Add(("· VICIOUS HAMMER APPLIED : 0", InfoColor));
             }
         }
 
@@ -117,26 +131,34 @@ public sealed class ItemTooltip
         var idLine = $"Item ID : {itemId}";
 
         // ── Measure ─────────────────────────────────────────────────────────────────
+        const int pillPad = 1, pillGap = 1, tabTrack = -2;   // tabTrack tightens letter spacing
         var dot = 5;
         var nameW = dot + 3 + (int)_font.Measure(name).X;
-        var reqW  = reqs.Count == 0 ? 0 : reqs.Max(r => (int)_font.Measure($"{r.label} : {r.val}").X);
-        var blockW = reqs.Count == 0 ? iconBox : iconBox + iconGap + reqW;
-        var pillsW = isEquip ? JobPills.Sum(p => (int)_font.Measure(p).X + pillPad * 2 + pillGap) - pillGap : 0;
+        // Single column of reqs with the value column aligned: widest "LABEL :" + a gap + widest value.
+        var labelW = 0; var valW = 0;
+        foreach (var (label, val, _) in reqs)
+        {
+            labelW = Math.Max(labelW, (int)_font.Measure($"{label} :").X);
+            valW   = Math.Max(valW, (int)_font.Measure(val).X);
+        }
+        const int valGap = 5;
+        var blockW = reqs.Count == 0 ? iconBox : iconBox + iconGap + labelW + valGap + valW;
+        var pillsW = isEquip ? JobNames.Sum(p => (int)_tabFont.Measure(p).X + tabTrack * p.Length + pillPad * 2 + pillGap) - pillGap : 0;
         var infoW = info.Count == 0 ? 0 : info.Max(t => (int)_font.Measure(t.text).X);
         var descW = descLines.Count == 0 ? 0 : descLines.Max(s => (int)_font.Measure(s).X);
         var idW   = (int)_font.Measure(idLine).X;
-        var contentW = new[] { nameW, blockW, pillsW, infoW, descW, idW, 130 }.Max();
+        var contentW = new[] { nameW, blockW, pillsW, infoW, descW, idW, 120 }.Max();
         var w = contentW + pad * 2;
 
-        // Height.
-        var priceH = price > 0 ? lh + 2 : 0;
+        // Height (tight line spacing throughout).
+        var priceH = price > 0 ? lineStep + 1 : 0;
         var leftColH = iconBox + priceH;
-        var blockH = Math.Max(leftColH, reqs.Count * lh);
-        var h = pad + lh + 3 + Div() + blockH;         // name + divider + (icon | reqs)
-        if (isEquip) h += lh + 6;                      // job pills
-        h += Div() + info.Count * lh;                  // info section
-        if (descLines.Count > 0) h += Div() + descLines.Count * lh;
-        h += Div() + lh + pad;                         // item id
+        var blockH = Math.Max(leftColH, reqRows * lineStep);
+        var h = pad + lh + 2 + Div() + blockH;          // name + divider + (icon | 2-col reqs)
+        if (isEquip) h += 5 + tabH;                      // job-requirement tabs (gap above + box)
+        h += Div() + info.Count * lineStep;             // info section
+        if (descLines.Count > 0) h += Div() + descLines.Count * lineStep;
+        h += Div() + lineStep + pad;                    // item id
 
         var x = mouseX + 16;
         var y = mouseY + 16;
@@ -153,61 +175,69 @@ public sealed class ItemTooltip
         // Name with a bullet dot.
         sb.Draw(white, new Rectangle(x + pad, cy + lh / 2 - 2, 3, 3), new Color(220, 230, 250));
         _font.Draw(sb, name, new Vector2(x + pad + dot + 3, cy), grade > 0 ? GradeColor(grade) : NameColor);
-        cy += lh + 3;
+        cy += lh + 2;
         cy = Divline(sb, white, x, cy, w, pad);
 
-        // Icon + requirement block.
+        // Icon (enlarged preview) + requirement block.
         var blockTop = cy;
         var iconRect = new Rectangle(x + pad, blockTop, iconBox, iconBox);
         sb.Draw(white, iconRect, new Color(0, 0, 0, 90));
         DrawBorder(sb, white, iconRect, new Color(110, 130, 165));
         var icon = _icons.LoadIcon(itemId);
         if (icon != null)
-            icon.Draw(sb, new Vector2(iconRect.X + (iconBox - icon.Width) / 2f, iconRect.Y + (iconBox - icon.Height) / 2f) + icon.Origin);
+        {
+            // Scale the icon up to fill the box (item icons are ~32px) so it's actually readable on hover.
+            var scale = Math.Min(2.4f, (iconBox - 6f) / Math.Max(icon.Width, icon.Height));
+            var dw = (int)(icon.Width * scale); var dh = (int)(icon.Height * scale);
+            sb.Draw(icon.Texture, new Rectangle(iconRect.X + (iconBox - dw) / 2, iconRect.Y + (iconBox - dh) / 2, dw, dh), Color.White);
+        }
         if (attr is { Cash: true }) DrawCashCoin(sb, white, iconRect.X + 1, iconRect.Bottom - 11);
 
         if (price > 0)
         {
             DrawCashCoin(sb, white, x + pad, blockTop + iconBox + 1);
             _font.Draw(sb, price.ToString("N0", System.Globalization.CultureInfo.InvariantCulture),
-                new Vector2(x + pad + 13, blockTop + iconBox + 2), new Color(235, 215, 120));
+                new Vector2(x + pad + 13, blockTop + iconBox + 1), new Color(235, 215, 120));
         }
 
-        var rx = x + pad + iconBox + iconGap;
-        var ry = blockTop;
-        foreach (var (label, val, bad) in reqs)
+        var rxL = x + pad + iconBox + iconGap;
+        var valX = rxL + labelW + valGap;   // aligned value column
+        var reqTop = blockTop + Math.Max(0, (iconBox - reqRows * lineStep) / 2);   // centre rows beside the icon
+        for (var i = 0; i < reqs.Count; i++)
         {
-            var lp = $"{label} : ";
-            _font.Draw(sb, lp, new Vector2(rx, ry), ReqLabel);
-            _font.Draw(sb, val, new Vector2(rx + _font.Measure(lp).X, ry), val == "-" ? Dash : (bad ? ReqBad : ReqVal));
-            ry += lh;
+            var (label, val, bad) = reqs[i];
+            var ry = reqTop + i * lineStep;
+            _font.Draw(sb, $"{label} :", new Vector2(rxL, ry), ReqLabel);
+            _font.Draw(sb, val, new Vector2(valX, ry), val == "-" ? Dash : (bad ? ReqBad : ReqVal));
         }
         cy = blockTop + blockH;
 
-        // Job pills.
+        // Job-requirement tabs: the six classes spelled out in a very small font, in tight little boxes —
+        // the ones that can wear the item shown bright and the rest greyed (native uses small icons).
         if (isEquip)
         {
+            cy += 5;   // drop the tab row down a bit: more gap above (from ITEM EXP), less below (to category)
             var px = x + pad;
             for (var i = 0; i < 6; i++)
             {
-                var pw = (int)_font.Measure(JobPills[i]).X + pillPad * 2;
-                var pr = new Rectangle(px, cy, pw, lh + 2);
-                sb.Draw(white, pr, jobOk[i] ? PillOn : PillOff);
-                _font.Draw(sb, JobPills[i], new Vector2(px + pillPad, cy + 1), jobOk[i] ? PillTxtOn : PillTxtOff);
+                var tw = (int)_tabFont.Measure(JobNames[i]).X + tabTrack * JobNames[i].Length;
+                var pw = tw + pillPad * 2;
+                sb.Draw(white, new Rectangle(px, cy, pw, tabH), jobOk[i] ? PillOn : PillOff);
+                _tabFont.Draw(sb, JobNames[i], new Vector2(px + pillPad, cy + tabTextY), jobOk[i] ? PillTxtOn : PillTxtOff, 1f, tabTrack);
                 px += pw + pillGap;
             }
-            cy += lh + 6;
+            cy += tabH;
         }
 
         // Info (category / stats / upgrades / hammer).
         cy = Divline(sb, white, x, cy, w, pad);
-        foreach (var (text, c) in info) { _font.Draw(sb, text, new Vector2(x + pad, cy), c); cy += lh; }
+        foreach (var (text, c) in info) { _font.Draw(sb, text, new Vector2(x + pad, cy), c); cy += lineStep; }
 
         // Description.
         if (descLines.Count > 0)
         {
             cy = Divline(sb, white, x, cy, w, pad);
-            foreach (var s in descLines) { _font.Draw(sb, s, new Vector2(x + pad, cy), DescColor); cy += lh; }
+            foreach (var s in descLines) { _font.Draw(sb, s, new Vector2(x + pad, cy), DescColor); cy += lineStep; }
         }
 
         // Item id.
