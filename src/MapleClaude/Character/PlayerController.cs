@@ -63,6 +63,12 @@ public sealed class PlayerController
     /// root a grounded melee swing so the avatar doesn't slide while attacking.</summary>
     public bool    Grounded   => _grounded;
 
+    /// <summary>Id of the foothold the player is currently standing on, or the last one they were grounded
+    /// on while airborne (the v95 client preserves the last layer assignment until the next landing). 0 when
+    /// the player has never touched a foothold. Used by the layered render pass to look up the player's
+    /// current draw layer.</summary>
+    public int     CurrentFoothold => _currentFoothold;
+
     /// <summary>True while a knockback impulse is still playing out — movement input is
     /// locked so the player visibly flies back instead of immediately being overridden by
     /// WASD. Cleared automatically when the stagger window expires.</summary>
@@ -195,6 +201,7 @@ public sealed class PlayerController
             FallFreely(dt);
         }
         ClampToBounds();   // keep the player inside the map's VR (or foothold AABB) after either path
+        TryRescueIfBelowMap();   // safety net: warp to the closest foothold if pinned beneath all floors
 
         // START_FALL_DOWN: was on a foothold, now in the air, didn't jump
         if (_wasGrounded && !_grounded && (!jumpEdge || downJumped))
@@ -374,6 +381,51 @@ public sealed class PlayerController
         // stance is driven by input direction, so the walk animation still plays while pinned at the edge.
         _velocity = new Vector2(x != Position.X ? 0f : _velocity.X, y != Position.Y ? 0f : _velocity.Y);
         Position  = new Vector2(x, y);
+    }
+
+    /// <summary>Safety net for "fell out of the world": when the player is airborne (or has otherwise
+    /// stopped falling) at the bottom edge of <see cref="FieldScene.Bounds"/> with no walkable floor under
+    /// them, snap them onto the closest walkable foothold and emit a NORMAL move element so the server
+    /// learns the corrected position. Without this, the VR clamp pins them at <c>Bounds.Bottom</c> with
+    /// <c>_grounded=false</c> forever — they can walk sideways but never climb back up. Skipped while
+    /// climbing (the ladder/rope state owns position) and while genuinely grounded.</summary>
+    private void TryRescueIfBelowMap()
+    {
+        if (_climb is not null || _grounded) return;
+        // "Stuck below" = pinned at the bottom of the playable bounds with no floor directly above.
+        // GetFootholdBelow scans for ground at or below Y; if there's none, we've fallen past every floor.
+        if (Position.Y < _field.Bounds.Bottom - 1f) return;
+        if (_field.GetFootholdBelow(Position.X, Position.Y) is not null) return;
+
+        var fh = _field.GetClosestFoothold(Position.X, Position.Y);
+        if (fh is null) return;
+
+        var landing = fh.ClosestPoint(Position.X, Position.Y);
+        Position         = landing;
+        _velocity        = Vector2.Zero;
+        _grounded        = true;
+        _currentFoothold = fh.Id;
+
+        // Discard any in-flight move-path (it described the fall) and resync the baseline so the next
+        // accumulated NORMAL describes movement from the rescued spot, not from the bottom of the void.
+        _pending.Clear();
+        _flushTimer     = 0f;
+        _lastSyncPos    = Position;
+        _lastSyncVel    = _velocity;
+        _lastSyncStance = Stance;
+        // Force-emit a NORMAL now so the server gets the new ground position immediately (next per-frame
+        // flush in GameStage sends it). HasChangedSinceSync would otherwise gate this away as idle.
+        _pending.Add(new MoveElement
+        {
+            Attr       = 0,
+            X          = (short)Position.X,
+            Y          = (short)Position.Y,
+            Vx         = 0,
+            Vy         = 0,
+            Fh         = (short)_currentFoothold,
+            MoveAction = StanceMoveAction(Stance.Stand1),
+            Elapse     = 1,
+        });
     }
 
     // ── Ladder / rope climbing ─────────────────────────────────────────────────

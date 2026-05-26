@@ -208,28 +208,36 @@ public class MobMoveTests
     }
 
     [Fact]
-    public void UserHit_Knockback_Encodes_TheKnockbackByte()
+    public void UserHit_Knockback_Encodes_ReflectBlockAndStance()
     {
-        // knockback = 2 means "I took a knockback" — the server (HitHandler.handleHit)
-        // broadcasts it via UserRemote.hit so other clients play our flinch animation.
-        // We deliberately skip the reflect block in the basic-body-touch path; if the
-        // server ever starts requiring it when knockback > 1, expand the encoder.
+        // knockback = 2 means "I took a knockback" - Kinoko's HitHandler then reads the
+        // 14-byte reflect block (powerGuard + reflectMob* + ptHit + userPos). Omitting
+        // it would BufferUnderflow the server. userX/userY carry the player's position.
         var packet = GameSender.UserHit(
             attackIndex: 0, magicElemAttr: 0, damage: 10,
-            templateId: 100000, mobId: 99, dir: 0, knockback: 2);
+            templateId: 100000, mobId: 99, dir: 0, knockback: 2,
+            userX: 250, userY: -120);
         var p = new InPacket(packet.ToArray());
-        p.ReadShort();    // opcode
-        p.ReadInt();      // update_time
-        p.ReadByte();     // attackIndex
-        p.ReadByte();     // magicElemAttr
-        p.ReadInt();      // damage
-        p.ReadInt();      // templateId
-        p.ReadInt();      // mobId
-        p.ReadByte();     // dir
-        p.ReadByte();     // reflect
-        p.ReadByte();     // guard
-        p.ReadByte().Should().Be((byte)2);   // knockback = 2 (took a knockback)
-        p.ReadByte();     // stance
+        p.ReadShort();                                // opcode
+        p.ReadInt();                                  // update_time
+        p.ReadByte();                                 // attackIndex
+        p.ReadByte();                                 // magicElemAttr
+        p.ReadInt();                                  // damage
+        p.ReadInt();                                  // templateId
+        p.ReadInt();                                  // mobId
+        p.ReadByte();                                 // dir
+        p.ReadByte();                                 // reflect
+        p.ReadByte();                                 // guard
+        p.ReadByte().Should().Be((byte)2);            // knockback = 2
+        // Reflect block (only present when knockback > 1 || reflect != 0):
+        p.ReadByte().Should().Be((byte)0);            // bPowerGuard
+        p.ReadInt().Should().Be(0);                   // dwReflectMobID
+        p.ReadByte().Should().Be((byte)0);            // bReflectMobAction
+        p.ReadShort().Should().Be((short)0);          // ptHit.x
+        p.ReadShort().Should().Be((short)0);          // ptHit.y
+        p.ReadShort().Should().Be((short)250);        // user.x
+        p.ReadShort().Should().Be((short)(-120));     // user.y
+        p.ReadByte().Should().Be((byte)0);            // stance
         p.Remaining.Should().Be(0);
     }
 

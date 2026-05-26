@@ -268,6 +268,15 @@ See `docs/roadmap.md` and `README.md` for the table.
 | `opcode-sync` | Kinoko `In/OutHeader.java` changed | Run `tools/gen-opcodes`, report any renames/insertions |
 | `crypto-validator` | Edits under `src/MapleClaude.Net/Crypto/` | Ensure C# pipeline is byte-identical to Java reference via known-vector tests |
 | `disasm-lookup` | Question about an original v95 client function | Resolve via local-only paths from `CLAUDE.local.md`; never print the path |
+| `idb-bind` | Need the live `ida-pro/idalib` MCP but it may be busy/disconnected | Bind the `.i64`, background-wait when locked, copy-to-temp fallback, alignment check |
+| `wz-subsystem-research` | "Research Item.wz / Skill.wz / Map.wz / Quest.wz / etc." — full subsystem sweep (20+ fields) | Kinoko `*Template.java` + IDB `CXxx*` cross-reference, structured report → typed C# model + `docs/<x>-wz.md` |
+| `ida-lookup` | "Look into the IDB", "reference the IDB", "look up CXxx", "decompile CUI[X]" — single-symbol IDB query | `idb-bind` → `lookup_funcs`/`decompile`/`xrefs_to` → paraphrased answer, no `.i64` path leak |
+| `authentic-ui-rebuild` | "Not the custom overlay, the authentic v95 X", "rebuild [UI] from WZ+IDB" | WZ subtree + `CUI*` decompile + coordinate extraction; escalates to `v95-ui-rebuilder` / `ui-origin-finder` agents |
+| `ingame-feature` | "Implement [combat / death / drop / pickup / NPC click / emotion / ...]", "mobs should X" — full feature end-to-end | Coordinates packets + IDB animation + WZ assets + runtime; delegates to packet/WZ/audio skills |
+| `wz-audio-bind` | "Play [X] sound", "BGM from Sound.wz", "mob sounds on hit" | Locate Sound.wz node → wire through `src/MapleClaude/Audio/` MonoGame XAudio2 service |
+| `ship-pr` | "Commit, push, PR, merge", "open a PR", "ship it" | Sequenced commit → push → PR → merge with privacy guard + mandatory per-commit approval |
+| `autonomous-phase` | "Continue with the next phase", "auto-implement the rest", "im going to bed" | Read `docs/roadmap.md` → plan → implement → ship via `ship-pr` → loop (commit-ask still required) |
+| `layout-tune` | "Move it 3px down", "icon too high", "position is wrong" | Redirect to live overlay (`watch.ps1` + `MAPLECLAUDE_DEBUG=1`); else single-constant code edit |
 
 ## Claude agents
 

@@ -66,6 +66,10 @@ public sealed class GameStage : Stage
     // While > 0 the touch-damage trigger below skips all collisions so mobs can't combo us.
     private float _userHitCooldown;
     private MobInfoService? _mobInfoSvc;
+    /// <summary>Plays mob SFX from Sound.wz/Mob.img/&lt;id:D7&gt;/&lt;event&gt; (Damage / Die /
+    /// AttackN / SkillN / CharDamN / Regen / Bomb). See MobSoundService for the full
+    /// event taxonomy + the v95 client mapping it mirrors.</summary>
+    private MobSoundService? _mobSounds;
 
     // Other players
     private readonly Dictionary<int, OtherCharLook> _otherChars = new();
@@ -136,12 +140,21 @@ public sealed class GameStage : Stage
     private Notice? _notice;
     private QuitConfirmOverlay? _quitConfirm;
     private GameMenu? _gameMenu;   // authentic CUIGameMenu (ESC / status-bar System button)
+    private Revive? _revivePanel;  // CUIRevive — modal that appears after the tombstone lands
 
     private readonly List<GamePanel> _panels = new();
     private GamePacketHandler? _netHandler;
 
     // Accumulated stat snapshot from server packets
     private CharStats _charStats = new();
+
+    // ── Death state ─────────────────────────────────────────────────────────────
+    // CUserLocal::OnSetDead → tombstone falls at the foothold → CUIRevive opens.
+    // _isPlayerDead gates all movement / attack / touch-damage input until the
+    // server's SetField (after we send GameSender.Revive) clears the flag.
+    private bool _isPlayerDead;
+    private Vector2 _deathPosition;
+    private TombstoneEffect? _tombstone;
 
     // Accumulated skill records (id → record). Single-skill ChangeSkillRecord
     // deltas merge into this set rather than replacing it; the Skill window is
@@ -207,6 +220,19 @@ public sealed class GameStage : Stage
     private const int MeleeReachX = 120;   // px in front of the player
     private const int MeleeReachY = 40;    // px above/below the player's foot point
     private const int MaxMeleeTargets = 15; // v95 caps a melee swing at 15 mobs (IDB: CMobPool::FindHitMobInRect apMob[15])
+
+    // Player body box used by touch-damage rect-vs-rect overlap. Matches the placeholder
+    // we already draw for the avatar (CharLook PlaceholderW=30, PlaceholderH=60) so the
+    // gate lines up with what the player sees.
+    private const int PlayerHalfWidth = 15;
+    private const int PlayerHeight    = 60;
+
+    // Fallback rect for mobs whose current animation frame doesn't carry lt/rb (e.g. a
+    // placeholder render with no WZ canvas). Anchored at the foot; sized to the mob
+    // placeholder so the gate doesn't go to zero on degraded data.
+    private static Rectangle MobFallbackRect(Vector2 footPos) =>
+        new((int)footPos.X - 20, (int)footPos.Y - 50, 40, 50);
+
     private static readonly Random _attackRng = new();
 
     public GameStage(
@@ -492,8 +518,23 @@ public sealed class GameStage : Stage
         // misses). DamageDigits loads them once; DamageNumber draws them with a text
         // fallback if any glyph is missing.
         _dmgNumbers    = new DamageNumber(font, new DamageDigits(Game.EffectWz, _loader));
+        _mobSounds     = new MobSoundService(_sound, Game.AudioPlayer, _logger);
         _emotionBubble = new EmotionBubble(Game.EffectWz, _loader);
         _familyWindow  = new FamilyWindow (_loader, _ui, font);
+
+        // ── Death pipeline (CUser::OnSetDead → CUIRevive → revive packet) ─────
+        // Tombstone falls in world space at the foothold; on landing it raises
+        // the modal town-revive dialog. OK click sends GameSender.Revive (empty-
+        // portal UserTransferFieldRequest(41), bPremium=false) and the server
+        // warps us to the field's returnMap with HP=50.
+        _tombstone   = new TombstoneEffect(Game.EffectWz, Game.SoundWz, _loader, Game.AudioPlayer, _logger);
+        _revivePanel = new Revive(_loader, _ui, font, Game.WhitePixel)
+        {
+            OnRevive = premium => { if (Game.Session.IsConnected) Game.Session.Send(GameSender.Revive(_fieldKey, premium)); },
+        };
+        _tombstone.OnLanded = () => _revivePanel?.Open();
+        var rvPp = Game.GraphicsDevice.PresentationParameters;
+        _revivePanel.Relayout(rvPp.BackBufferWidth, rvPp.BackBufferHeight);
 
         // ── Community window actions → protocol senders ───────────────────────────
         _userList.OnAddFriend    = name => { if (name.Length > 0) { SendIfConnected(GameSender.FriendAdd(name)); _chatBar?.AddLine($"Buddy request sent to {name}.", new Color(150, 220, 150)); } };
@@ -547,6 +588,7 @@ public sealed class GameStage : Stage
         _panels.Add(_familyWindow);
         _panels.Add(_channelSelect);
         _panels.Add(_messenger);
+        _panels.Add(_revivePanel);
 
         // ── Network packet handler ────────────────────────────────────────────
         _netHandler = new GamePacketHandler(_loggerFactory.CreateLogger<GamePacketHandler>());
@@ -556,6 +598,10 @@ public sealed class GameStage : Stage
             _charStats = stats;
             if (!string.IsNullOrEmpty(stats.Name)) _myName = stats.Name;
             PushCharStats(stats);
+            // HP bit (0x400): a server-authoritative HP write may have killed us
+            // (e.g. lethal-attack server adjustment). Local touch damage also
+            // funnels through this snapshot on the next echo.
+            if ((mask & 0x400) != 0) CheckDeath();
             // Only celebrate a level-up when this burst actually carried LEVEL —
             // the snapshot is persistent, so stats.Level is set on every packet.
             if ((mask & 0x10) != 0 && stats.Level > 0)
@@ -618,7 +664,16 @@ public sealed class GameStage : Stage
 
         fh.OnStatChanged += a =>
         {
-            if ((a.Mask & 0x400) != 0) { if (_stats != null) _stats.Hp = a.Hp; if (_statusBar != null) _statusBar.Hp = a.Hp; }
+            if ((a.Mask & 0x400) != 0)
+            {
+                if (_stats != null) _stats.Hp = a.Hp; if (_statusBar != null) _statusBar.Hp = a.Hp;
+                // Keep the death-detector source-of-truth in sync: this handler runs
+                // BEFORE _netHandler.OnStatChanged on the same packet, and a packet
+                // that only delivers an HP bit (regen tick, drain, lethal) won't push
+                // a full CharStats snapshot until the dual-decode echo arrives.
+                _charStats.Hp = a.Hp;
+                CheckDeath();
+            }
             if ((a.Mask & 0x800) != 0) { if (_stats != null) _stats.MaxHp = a.MaxHp; if (_statusBar != null) _statusBar.MaxHp = a.MaxHp; }
             if ((a.Mask & 0x1000)!= 0) { if (_stats != null) _stats.Mp = a.Mp; if (_statusBar != null) _statusBar.Mp = a.Mp; }
             if ((a.Mask & 0x2000)!= 0) { if (_stats != null) _stats.MaxMp = a.MaxMp; if (_statusBar != null) _statusBar.MaxMp = a.MaxMp; }
@@ -761,30 +816,92 @@ public sealed class GameStage : Stage
 
         fh.OnMobEnter += args =>
         {
+            var mInfo = _mobInfoSvc?.Get(args.TemplateId);
             var mob = new MobLook(args.MobId, args.TemplateId,
                                   new Vector2(args.X, args.Y))
             {
-                Name  = Game.Names?.MobName(args.TemplateId) ?? string.Empty,
-                Level = _mobInfoSvc?.Get(args.TemplateId).Level ?? 0,
+                Name         = Game.Names?.MobName(args.TemplateId) ?? string.Empty,
+                Level        = mInfo?.Level        ?? 0,
+                HpTagColor   = mInfo?.HpTagColor   ?? 0,
+                HpTagBgColor = mInfo?.HpTagBgColor ?? 0,
             };
             mob.Load(_loader!, _mobWz);
+
+            // Snap non-flying mobs to the foothold at their spawn position. The server
+            // hands us (x, y, fhId); STAY mobs never tick a controller and WALK/JUMP
+            // mobs have a gap before MobController's first StepWalk, so without this
+            // they hang at the raw spawn Y. Prefer the server-assigned foothold id,
+            // fall back to the nearest floor below when fhId is 0 or the spawn X is
+            // outside that segment. Mirrors PlayerController.Spawn.
+            if (_field is not null && (mInfo is null || !mInfo.IsFly))
+            {
+                var spawnFh = args.FhId > 0 ? _field.GetFoothold(args.FhId) : null;
+                var groundY = spawnFh?.YAt(args.X);
+                if (groundY is null)
+                    groundY = _field.GetFootholdBelow(args.X, args.Y - 1)?.YAt(args.X);
+                if (groundY is { } gy)
+                    mob.Position = new Vector2(args.X, gy);
+            }
+            // Render layer: prefer the server-assigned foothold id (the mob is anchored to it), fall back
+            // to the nearest floor below the spawn point. Fly mobs end up with whatever layer LayerAt
+            // resolves under their spawn point — good enough since fly mobs visually float above terrain.
+            if (_field is not null)
+                mob.Layer = args.FhId > 0 ? _field.LayerOfFoothold(args.FhId)
+                                          : _field.LayerAt(args.X, args.Y);
+
             _mobs[args.MobId] = mob;
             _logger.LogDebug("Mob enter: id={Id} tmpl={T} pos=({X},{Y})", args.MobId, args.TemplateId, args.X, args.Y);
         };
 
-        // MobHPIndicator(298) — server's "you just hit this mob" update. Pushes the mob's
+        // MobHPIndicator(298) - server's "you just hit this mob" update. Pushes the mob's
         // current HP percentage to drive the HP bar above the mob (auto-hides after ~5s).
+        // When the percentage hits 0 the mob is dead; play the die anim immediately so the
+        // visual doesn't wait for the follow-up MobLeaveField(type=1 ETC / 2 SELFDESTRUCT).
+        // Also release control so the dying mob's AI stops emitting MobMove.
         fh.OnMobHpIndicator += (mobId, pct) =>
         {
-            if (_mobs.TryGetValue(mobId, out var mob)) mob.SetHpPercent(pct);
+            if (!_mobs.TryGetValue(mobId, out var mob)) return;
+            mob.SetHpPercent(pct);
+            if (pct == 0)
+            {
+                var wasAlreadyDying = mob.IsDying;
+                mob.OnDie();
+                if (!wasAlreadyDying) _mobSounds?.PlayDie(mob.TemplateId);   // Sound.wz/Mob.img/<id>/Die
+                _controlledMobs.Remove(mobId);
+                _mobCtl.Remove(mobId);
+                _pendingCtrl.Remove(mobId);
+            }
         };
 
-        fh.OnMobLeave += mobId =>
+        fh.OnMobLeave += (mobId, leaveType) =>
         {
-            _mobs.Remove(mobId);
+            // Always release control regardless of leaveType - the AI shouldn't keep emitting
+            // MobMove for a mob the server has already despawned (would log "Could not resolve
+            // mob ID" on the server). Cleanup of the controller is independent of the visual.
             _controlledMobs.Remove(mobId);
             _mobCtl.Remove(mobId);
             _pendingCtrl.Remove(mobId);
+
+            // Kinoko MobLeaveType: REMAINHP=0, ETC=1, SELFDESTRUCT=2, DESTRUCTBYMISS=3,
+            // SWALLOW=4, SUMMONTIMEOUT=5. Damage-kills send ETC(1) (Mob.damage default in
+            // Kinoko); SELFDESTRUCT(2) is bomb-slime detonation; DESTRUCTBYMISS(3) is the
+            // miss-trap mobs. Play the WZ die1 animation for all three. REMAINHP/SWALLOW/
+            // SUMMONTIMEOUT are silent despawns (HP-recovery fade, swallowed by another
+            // mob, summon timeout) - remove without an animation.
+            var killed = leaveType is 1 or 2 or 3;
+            if (killed && _mobs.TryGetValue(mobId, out var dyingMob))
+            {
+                // The per-tick dead-mobs sweep (mob.IsDead) removes the entry from _mobs
+                // only once MobLook.Update has run the last die1 frame, so the mob fades
+                // into its death pose instead of vanishing instantly.
+                var wasAlreadyDying = dyingMob.IsDying;
+                dyingMob.OnDie();
+                if (!wasAlreadyDying) _mobSounds?.PlayDie(dyingMob.TemplateId);
+            }
+            else
+            {
+                _mobs.Remove(mobId);
+            }
         };
 
         fh.OnMobMove += args =>
@@ -796,6 +913,9 @@ public sealed class GameStage : Stage
                 mob.SetFacing(dx < 0);
                 mob.Position  = newPos;
                 mob.SetState(MobLook.MobState.Move);
+                // Sync render layer from the new position so a mob crossing onto a different-layer foothold
+                // hops into the correct per-layer draw pass (e.g. wandering through an obj layer 4 → 6).
+                if (_field is not null) mob.Layer = _field.LayerAt(newPos.X, newPos.Y, mob.Layer);
             }
         };
 
@@ -817,6 +937,11 @@ public sealed class GameStage : Stage
             // controller for the aggro timer to kick in. (Multi-client: this would
             // over-aggro on any nearby player's hit; revisit when party play lands.)
             if (_mobCtl.TryGetValue(args.MobId, out var ctl)) ctl.OnDamagedByPlayer();
+            // Observer Damage sound - the IDB shows the real client plays Sound.wz/Mob.img/<id>/Damage
+            // for every observer when MobDamaged broadcasts. Our local melee hit plays it directly
+            // in DoMeleeAttack; this branch covers damage from OTHER players (multi-client play).
+            if (_mobs.TryGetValue(args.MobId, out var dmgMob))
+                _mobSounds?.PlayDamage(dmgMob.TemplateId);
         };
 
         fh.OnMobChangeController += (mobId, isCtrl) =>
@@ -839,10 +964,27 @@ public sealed class GameStage : Stage
             var existing = _npcs.FirstOrDefault(n => n.ObjId == args.ObjId);
             if (existing is null)
             {
-                var npc = new NpcLook(args.TemplateId, new Vector2(args.X, args.Y), Game.Font)
+                // Snap the NPC's Y to the foothold's Y at the spawn X. Mirrors the authentic
+                // client: CNpc::Init feeds (x, y, foothold) into CVecCtrl::SetActive, which
+                // runs RelPos::SetFromAbsPos → AbsPos::SetFromRelPos — a round-trip that
+                // projects the point onto the foothold's line segment, so the visible Y is
+                // always exactly on the floor at that X. The WZ life-data Y is close but not
+                // always pixel-exact, which is what caused the "hovering NPC" look. Prefer the
+                // server-assigned foothold id, fall back to the nearest floor below.
+                var spawnY = (float)args.Y;
+                if (_field is not null)
+                {
+                    var spawnFh = args.FhId > 0 ? _field.GetFoothold(args.FhId) : null;
+                    var groundY = spawnFh?.YAt(args.X);
+                    if (groundY is null)
+                        groundY = _field.GetFootholdBelow(args.X, args.Y - 1)?.YAt(args.X);
+                    if (groundY is { } gy) spawnY = gy;
+                }
+                var npc = new NpcLook(args.TemplateId, new Vector2(args.X, spawnY), Game.Font)
                 {
                     ObjId = args.ObjId,
                     Name  = Game.Names.NpcName(args.TemplateId) ?? string.Empty,
+                    Layer = _field?.LayerAt(args.X, args.Y) ?? 7,
                 };
                 npc.Load(_loader!, _npcWz);
                 npc.FaceLeft(args.FacingLeft);
@@ -860,7 +1002,10 @@ public sealed class GameStage : Stage
         {
             if (_otherChars.ContainsKey(args.CharId)) return;
             var other = new OtherCharLook(args.CharId, args.Name, args.Level, args.Look,
-                                          new Vector2(args.X, args.Y), Game.Font);
+                                          new Vector2(args.X, args.Y), Game.Font)
+            {
+                Layer = _field?.LayerAt(args.X, args.Y) ?? 7,
+            };
             other.LoadSprites(_loader!, _charWz, _charRenderer);
             _otherChars[args.CharId] = other;
         };
@@ -880,7 +1025,10 @@ public sealed class GameStage : Stage
         fh.OnUserMove   += args =>
         {
             if (_otherChars.TryGetValue(args.CharId, out var other))
+            {
                 other.SetPosition(args.X, args.Y);
+                if (_field is not null) other.Layer = _field.LayerAt(args.X, args.Y, other.Layer);
+            }
         };
 
         // UserEmotion broadcast (charId>0) / UserEmotionLocal echo (charId==0).
@@ -910,7 +1058,10 @@ public sealed class GameStage : Stage
         fh.OnDropEnter += args =>
             _drops[args.DropId] = new DropSprite(args.DropId, args.IsMoney, args.ItemIdOrAmount,
                 new Vector2(args.SourceX, args.SourceY), new Vector2(args.X, args.Y), args.Animated,
-                args.IsMoney ? null : _iconLoader?.LoadIcon(args.ItemIdOrAmount), Game.Font);
+                args.IsMoney ? null : _iconLoader?.LoadIcon(args.ItemIdOrAmount), Game.Font)
+            {
+                Layer = _field?.LayerAt(args.X, args.Y) ?? 7,
+            };
 
         fh.OnDropLeave  += args =>
         {
@@ -1200,6 +1351,10 @@ public sealed class GameStage : Stage
     private void OnSetField(SetFieldArgs args)
     {
         _fieldKey = args.FieldKey;
+        // A SetField after a revive (or any field transfer while dead) clears the
+        // death gate so input + physics resume on the new map. The server has already
+        // set HP to 50 (or full for premium) and chosen the destination map.
+        ResetDeath();
         if (_map is null)
         {
             return;
@@ -1228,6 +1383,11 @@ public sealed class GameStage : Stage
                 Exp = seed.Exp, AP = seed.Ap, Fame = seed.Pop, Guild = _charStats.Guild,
             };
             PushCharStats(_charStats);
+            // Mirror the SetField seed into GamePacketHandler's StatChanged accumulator.
+            // Otherwise the first partial StatChanged(30) burst (HP-only from damage / regen,
+            // money tick, EXP gain, …) writes the snapshot's zero defaults over the authoritative
+            // Level / MaxHP / MaxMP via _netHandler.OnStatChanged → PushCharStats.
+            _netHandler?.SeedSnapshot(_charStats);
             if (args.Look is not null && _player is not null && _charRenderer is not null)
             {
                 _myLook = args.Look;
@@ -1953,7 +2113,9 @@ public sealed class GameStage : Stage
         // Typing in chat → the keyboard drives text, not the avatar. Also suppress all input when the
         // window isn't focused: the right-modifier check uses Win32 GetAsyncKeyState (focus-agnostic),
         // so without this an alt-tabbed R-Ctrl/R-Alt would still move/attack.
-        if (TextField.Active != null || !Game.IsActive)
+        // Death also drops the input mask: while _isPlayerDead, the avatar is frozen on the
+        // tombstone foothold and the modal Revive dialog owns input.
+        if (TextField.Active != null || !Game.IsActive || _isPlayerDead)
         {
             _moveLeft = _moveRight = _jumpPressed = _downPressed = _upPressed = false;
         }
@@ -1971,13 +2133,28 @@ public sealed class GameStage : Stage
         }
         // Held-key auto-repeat: holding the attack key re-swings once the per-attack delay has elapsed.
         // Game.IsActive gates the GetAsyncKeyState right-modifier check (R-Ctrl attack) to the focused window.
+        // No attacks while dead — the avatar is frozen and the modal is waiting on a click.
         if (_physics != null && _attackCooldown <= 0f && TextField.Active == null && Game.IsActive
+            && !_isPlayerDead
             && _keyConfig!.IsActionDown(kb, KeyConfig.KeyAction.Attack))
         {
             DoMeleeAttack();
         }
 
-        if (_physics != null)
+        if (_physics != null && _isPlayerDead)
+        {
+            // Frozen at the death point: hold the foothold, drive the "dead" pose,
+            // and pump the face-blink clock so the avatar's portrait keeps living.
+            // Skip _physics.Update entirely so no gravity / movement / UserMove fires.
+            _charRenderer?.Update(dt);
+            if (_player != null)
+            {
+                _player.Position = _deathPosition;
+                _player.UpdateFromPhysics(dt, Stance.Dead, _player.FacingLeft, false);
+            }
+            _camera.Target = _deathPosition;
+        }
+        else if (_physics != null)
         {
             // Root horizontal input while a melee swing plays: grounded, this stops the avatar from
             // sliding; airborne, it stops you steering mid-jump (you can't change direction while
@@ -1998,6 +2175,10 @@ public sealed class GameStage : Stage
             {
                 _player.Position = _physics.Position;
                 _player.UpdateFromPhysics(dt, _physics.Stance, _physics.FacingLeft, _physics.ClimbMoving);
+                // Render layer follows the foothold the player is grounded on. The controller preserves
+                // _currentFoothold across airborne frames, so a jump sustains the takeoff layer until landing.
+                if (_field is not null)
+                    _player.Layer = _field.LayerOfFoothold(_physics.CurrentFoothold, _player.Layer);
             }
             _camera.Target = _physics.Position;
 
@@ -2064,7 +2245,9 @@ public sealed class GameStage : Stage
         // mob's movement and aggro. We drain _pendingCtrl first so MobChangeController
         // packets that arrived during the fade-out window get their controllers built
         // now that _field is loaded. See MobController for the per-moveAbility AI.
-        if (_field is not null && _physics is not null && Game.Session.IsConnected)
+        // While dead the player has no controller responsibility (no movement, no
+        // touch damage); skip the entire block so a corpse can't keep aggroing mobs.
+        if (_field is not null && _physics is not null && Game.Session.IsConnected && !_isPlayerDead)
         {
             if (_pendingCtrl.Count > 0)
             {
@@ -2089,36 +2272,60 @@ public sealed class GameStage : Stage
                 // server validates against the mob's MobAttack(0) template + broadcasts; we
                 // apply HP locally for instant feedback (StatChanged corrects it shortly).
                 // Full mob-skill attacks (MobSkill -> Disease) are deferred.
-                // Touch-damage with real knockback. Gates:
-                //   - global player i-frame (_userHitCooldown, 1 s for GMS feel)
+                // Touch-damage. Gates:
                 //   - per-mob hit cooldown (ctl.CanHitPlayer, 2 s per IDB)
-                //   - mob must be aggressive AND have info/bodyAttack
-                //   - AABB overlap (35 px × 60 px around player)
-                // On hit we push the player AWAY from the mob via PlayerController.ApplyKnockback
-                // (raw velocity per IDB SetImpactNext — no fixed-strength constant; just (vx,vy)),
-                // send UserHit with knockback=2 so the server broadcasts the knockback to other
-                // players, apply HP locally for instant feedback (server's StatChanged corrects
-                // shortly), and start both cooldowns. Full mob-skill attacks (MobSkill → Disease)
-                // remain deferred.
-                if (_userHitCooldown <= 0f && ctl.CanHitPlayer && ctl.IsAggressive
-                    && ctl.Info.BodyAttack && _mobs.TryGetValue(mobId, out var mobLook))
+                //   - mob must have info/bodyAttack (NO aggro gate per IDB CMob::ProcessAttack -
+                //   - rectangle-vs-rectangle overlap between the player's body box and the
+                //     mob's per-frame body rect (Mob.wz lt/rb on the current canvas)
+                // If the player is currently in i-frame (_userHitCooldown > 0) we burn the
+                // mob's attempt and float a MISS sprite above the player (rendered by
+                // DamageDigits.DrawMiss from the WZ NoMiss asset) instead of taking damage.
+                // Otherwise the damage path runs: send UserHit with the full reflect block
+                // (knockback > 1 requires it — Kinoko HitHandler reads it conditionally),
+                // push the player back via ApplyKnockback, float a damage number above the
+                // player's head, and reset both cooldowns.
+                if (ctl.CanHitPlayer && ctl.Info.BodyAttack
+                    && _mobs.TryGetValue(mobId, out var mobLook))
                 {
                     var mp = mobLook.Position;
-                    if (Math.Abs(mp.X - playerPos.X) < 35f && Math.Abs(mp.Y - playerPos.Y) < 60f)
+                    var mobBody    = mobLook.GetWorldHitRect() ?? MobFallbackRect(mp);
+                    var playerBody = new Rectangle(
+                        (int)playerPos.X - PlayerHalfWidth,
+                        (int)playerPos.Y - PlayerHeight,
+                        PlayerHalfWidth * 2,
+                        PlayerHeight);
+                    if (mobBody.Intersects(playerBody))
                     {
-                        var dmg     = Math.Max(1, ctl.Info.Level * 3);
-                        var pushDir = playerPos.X >= mp.X ? +1f : -1f;
-                        // Tuned to a small "snail-touch" hop; bigger mobs can scale vx by level later.
-                        _physics.ApplyKnockback(vx: pushDir * 130f, vy: -260f);
-                        var dir     = (byte)(mp.X < playerPos.X ? 0 : 1);
-                        Game.Session.Send(GameSender.UserHit(
-                            attackIndex: 0, magicElemAttr: 0,
-                            damage: dmg, templateId: mobLook.TemplateId, mobId: mobId,
-                            dir: dir, knockback: 2));
-                        if (_charStats is not null)
-                            _charStats.Hp = Math.Max(0, _charStats.Hp - dmg);
-                        _userHitCooldown = 1.0f;      // player-global i-frame (GMS ≈ 1 s)
-                        ctl.NotePlayerHit();          // per-mob cooldown (IDB: 2 s)
+                        if (_userHitCooldown > 0f)
+                        {
+                            // Player i-frame is still hot - the attack is a clean miss. Float MISS
+                            // above the player and consume the mob's 2 s cooldown so it doesn't
+                            // re-attempt every frame while we're still body-contacting it.
+                            _dmgNumbers?.Add(0, playerPos + new Vector2(0, -80), DamageNumber.Kind.DamageMiss);
+                            ctl.NotePlayerHit();
+                        }
+                        else
+                        {
+                            var dmg     = Math.Max(1, ctl.Info.Level * 3);
+                            var pushDir = playerPos.X >= mp.X ? +1f : -1f;
+                            _physics.ApplyKnockback(vx: pushDir * 130f, vy: -260f);
+                            var dir     = (byte)(mp.X < playerPos.X ? 0 : 1);
+                            Game.Session.Send(GameSender.UserHit(
+                                attackIndex: 0, magicElemAttr: 0,
+                                damage: dmg, templateId: mobLook.TemplateId, mobId: mobId,
+                                dir: dir, knockback: 2,
+                                userX: (short)playerPos.X, userY: (short)playerPos.Y));
+                            if (_charStats is not null)
+                                _charStats.Hp = Math.Max(0, _charStats.Hp - dmg);
+                            // Player damage number, above the head (player.Position is at the feet).
+                            _dmgNumbers?.Add(dmg, playerPos + new Vector2(0, -80), DamageNumber.Kind.DamageNormal);
+                            _userHitCooldown = 1.0f;
+                            ctl.NotePlayerHit();
+                            // HP just hit 0 locally → fire the death pipeline before the
+                            // server's StatChanged echo arrives, so the visual + dialog
+                            // start immediately.
+                            CheckDeath();
+                        }
                     }
                 }
             }
@@ -2143,6 +2350,10 @@ public sealed class GameStage : Stage
 
         // Over-head emotion bubbles
         _emotionBubble?.Update(dt);
+
+        // Tombstone fall (no-op until the player dies; advances frame-by-frame
+        // and fires OnLanded → Revive dialog open).
+        _tombstone?.Update(dt);
 
         // Sync stats to panels
         if (_statusBar != null)
@@ -2211,89 +2422,22 @@ public sealed class GameStage : Stage
 
         // Field backdrop — use the real Map.wz scene if SetField has been
         // processed; otherwise fall back to archlo's tinted green ground plane.
+        // The per-layer callback interleaves dynamic entities (NPCs / mobs / drops /
+        // remote players / local player / tombstone) into each layer 0..7 pass so a
+        // mob on layer 2 visibly draws behind an obj in layer 4 — matching the v95
+        // client's CMapleStage::Draw loop.
         if (_field != null)
         {
             _field.Camera.Position = _camera.Position;
-            _field.Draw(sb, Game.WhitePixel, w, h);
+            _field.Draw(sb, Game.WhitePixel, w, h, layer => DrawEntitiesAtLayer(sb, w, h, layer));
         }
         else
         {
             sb.Draw(Game.WhitePixel, new Rectangle(0, 0, w, h), new Color(34, 85, 34));
             DrawGroundPlane(sb, w, h);
-        }
-
-        // NPCs (world-space → screen) + any quest marker floating above the head.
-        foreach (var npc in _npcs)
-        {
-            var sp = _camera.WorldToScreen(npc.Position);
-            if (sp.X <= -100 || sp.X >= w + 100) continue;
-            npc.Draw(sb, Game.WhitePixel, sp);
-            var marker = MarkerFramesFor(npc.NpcId);
-            if (marker.Length > 0)
-                marker[_markerFrame % marker.Length]
-                    .Draw(sb, new Vector2(sp.X, sp.Y - npc.HeadOffset - 18));   // QuestIcon origin is centred
-        }
-
-        // Drops
-        foreach (var drop in _drops.Values)
-        {
-            var ds = _camera.WorldToScreen(drop.Position);
-            if (ds.X > -50 && ds.X < w + 50 && ds.Y > -50 && ds.Y < h + 50)
-                drop.Draw(sb, Game.WhitePixel, ds);
-        }
-
-        // Mobs
-        foreach (var mob in _mobs.Values)
-        {
-            var ms = _camera.WorldToScreen(mob.Position);
-            if (ms.X > -80 && ms.X < w + 80)
-            {
-                mob.Draw(sb, Game.WhitePixel, ms);
-                // "{Name} (Lv. N)" tag below the mob for ~5 s after each hit — driven by
-                // MobLook's HitTagVisible timer (pulsed by OnHit + SetHpPercent).
-                if (mob.HitTagVisible && Game.Font != null && mob.NameTagText.Length > 0)
-                {
-                    var tag = mob.NameTagText;
-                    var sz  = Game.Font.Measure(tag);
-                    var tx  = ms.X - sz.X / 2f;
-                    var ty  = ms.Y + 6f;
-                    Game.Font.Draw(sb, tag, new Vector2(tx + 1f, ty + 1f), new Color(0, 0, 0, 200));
-                    Game.Font.Draw(sb, tag, new Vector2(tx,      ty),      Color.White);
-                }
-            }
-        }
-
-        // Other players
-        foreach (var other in _otherChars.Values)
-        {
-            var os = _camera.WorldToScreen(other.Position);
-            if (os.X > -80 && os.X < w + 80)
-                other.Draw(sb, Game.WhitePixel, os);
-        }
-
-        // Player character
-        if (_player != null)
-        {
-            var playerScreen = _camera.WorldToScreen(_player.Position);
-            _player.Draw(sb, Game.WhitePixel, playerScreen);
-
-            // Local-player name tag — drawn under the avatar's foot point
-            // (authentic v95 placement). Style matches OtherCharLook.
-            if (Game.Font is { } nameFont && !string.IsNullOrEmpty(_myName))
-            {
-                var tag = $"[{_charStats.Level}] {_myName}";
-                var sz  = nameFont.Measure(tag);
-                var tx  = playerScreen.X - sz.X / 2f;
-                var ty  = playerScreen.Y + 4f;
-                var bg  = new Rectangle((int)tx - 2, (int)ty - 1,
-                                        (int)sz.X + 4, nameFont.LineHeight + 2);
-                sb.Draw(Game.WhitePixel, bg, new Color(0, 0, 0, 160));
-                nameFont.Draw(sb, tag, new Vector2(tx, ty), new Color(255, 230, 100));
-            }
-
-            foreach (var fx in _skillEffects)
-                if (!fx.Screen)
-                    fx.Anim.Draw(sb, playerScreen, fx.Flip ? SpriteEffects.FlipHorizontally : SpriteEffects.None);
+            // No field → no foothold layers; render every entity once in the
+            // fallback's flat pass so the title-stage demo still shows them.
+            for (var layer = 0; layer < 8; layer++) DrawEntitiesAtLayer(sb, w, h, layer);
         }
 
         // Chat balloons above the speakers (arrow tip just above each head).
@@ -2344,6 +2488,121 @@ public sealed class GameStage : Stage
         if (_fadeAlpha > 0f)
             sb.Draw(Game.WhitePixel, new Rectangle(0, 0, w, h),
                 new Color(0, 0, 0, (int)(_fadeAlpha * 255f)));
+    }
+
+    /// <summary>Draw every dynamic entity whose foothold lives in <paramref name="layer"/>, after the
+    /// layer's tiles+objs have already been painted. Order inside the pass mirrors the v95 client (and
+    /// the v83 open-source reference):
+    ///   NPCs → mobs → remote players → tombstone → local player → drops
+    /// — drops come last so loot stays visible when the player stands on top of it.</summary>
+    private void DrawEntitiesAtLayer(SpriteBatch sb, int w, int h, int layer)
+    {
+        // NPCs (world-space → screen) + any quest marker floating above the head.
+        foreach (var npc in _npcs)
+        {
+            if (npc.Layer != layer) continue;
+            var sp = _camera.WorldToScreen(npc.Position);
+            if (sp.X <= -100 || sp.X >= w + 100) continue;
+            npc.Draw(sb, Game.WhitePixel, sp);
+            var marker = MarkerFramesFor(npc.NpcId);
+            if (marker.Length > 0)
+                marker[_markerFrame % marker.Length]
+                    .Draw(sb, new Vector2(sp.X, sp.Y - npc.HeadOffset - 18));   // QuestIcon origin is centred
+        }
+
+        // Mobs
+        foreach (var mob in _mobs.Values)
+        {
+            if (mob.Layer != layer) continue;
+            var ms = _camera.WorldToScreen(mob.Position);
+            if (ms.X > -80 && ms.X < w + 80)
+            {
+                mob.Draw(sb, Game.WhitePixel, ms);
+                // Below the mob (~5 s after each hit, driven by MobLook's HitTagVisible timer):
+                // a tiny "Lv. N" badge (8px tip-tab font) and, separated by a small gap, the
+                // mob name plate (Game.Font). Both share the same transparent dark background;
+                // tops align so the level sits at the same y as the name.
+                if (mob.HitTagVisible && Game.Font != null && mob.Name.Length > 0)
+                {
+                    var lvlFont  = _tipTabFont ?? Game.Font;
+                    var levelTxt = $"Lv. {mob.Level}";
+                    var nameTxt  = mob.Name;
+                    var levelSz  = lvlFont.Measure(levelTxt);
+                    var nameSz   = Game.Font.Measure(nameTxt);
+                    const int padX = 2;
+                    const int padY = 1;
+                    const int gap  = 3;
+                    var levelW = (int)levelSz.X + padX * 2;
+                    var nameW  = (int)nameSz.X  + padX * 2;
+                    var levelH = lvlFont.LineHeight  + padY * 2;
+                    var nameH  = Game.Font.LineHeight + padY * 2;
+                    var totalX = (int)(ms.X - (levelW + gap + nameW) / 2f);
+                    var nameY  = (int)(ms.Y + 6f);
+                    var levelY = nameY;                          // top-align the smaller badge
+                    var plateBg = new Color(20, 20, 20, 220);    // same transparent dark for both
+
+                    sb.Draw(Game.WhitePixel,
+                        new Rectangle(totalX, levelY, levelW, levelH),
+                        plateBg);
+                    lvlFont.Draw(sb, levelTxt,
+                        new Vector2(totalX + padX, levelY + padY), Color.White);
+
+                    var nameX = totalX + levelW + gap;
+                    sb.Draw(Game.WhitePixel,
+                        new Rectangle(nameX, nameY, nameW, nameH),
+                        plateBg);
+                    Game.Font.Draw(sb, nameTxt,
+                        new Vector2(nameX + padX, nameY + padY), Color.White);
+                }
+            }
+        }
+
+        // Other players
+        foreach (var other in _otherChars.Values)
+        {
+            if (other.Layer != layer) continue;
+            var os = _camera.WorldToScreen(other.Position);
+            if (os.X > -80 && os.X < w + 80)
+                other.Draw(sb, Game.WhitePixel, os);
+        }
+
+        // Local player (only when on this layer). Tombstone draws first inside the
+        // player's layer so the dead avatar sits visually on top of it.
+        if (_player != null && _player.Layer == layer)
+        {
+            _tombstone?.Draw(sb, _camera.WorldToScreen);
+
+            var playerScreen = _camera.WorldToScreen(_player.Position);
+            _player.Draw(sb, Game.WhitePixel, playerScreen);
+
+            // Local-player name tag — drawn under the avatar's foot point
+            // (authentic v95 placement). Style matches OtherCharLook.
+            if (Game.Font is { } nameFont && !string.IsNullOrEmpty(_myName))
+            {
+                var tag = _myName;
+                var sz  = nameFont.Measure(tag);
+                var tx  = playerScreen.X - sz.X / 2f;
+                var ty  = playerScreen.Y + 4f;
+                var bg  = new Rectangle((int)tx - 2, (int)ty - 1,
+                                        (int)sz.X + 4, nameFont.LineHeight + 2);
+                sb.Draw(Game.WhitePixel, bg, new Color(0, 0, 0, 160));
+                nameFont.Draw(sb, tag, new Vector2(tx, ty), new Color(255, 230, 100));
+            }
+
+            foreach (var fx in _skillEffects)
+                if (!fx.Screen)
+                    fx.Anim.Draw(sb, playerScreen, fx.Flip ? SpriteEffects.FlipHorizontally : SpriteEffects.None);
+        }
+
+        // Drops — last in the per-layer pass so loot stays visible when the player
+        // stands on top of it (matches the v83 reference order).
+        foreach (var drop in _drops.Values)
+        {
+            if (drop.Layer != layer) continue;
+            var ds = _camera.WorldToScreen(drop.Position);
+            if (ds.X > -50 && ds.X < w + 50 && ds.Y > -50 && ds.Y < h + 50)
+                drop.Draw(sb, Game.WhitePixel, ds);
+        }
     }
 
     private void DrawGroundPlane(SpriteBatch sb, int w, int h)
@@ -2977,16 +3236,26 @@ public sealed class GameStage : Stage
             case KeyConfig.KeyAction.ChangeChannel:  _channelSelect!.IsVisible = !_channelSelect.IsVisible;  break;
             case KeyConfig.KeyAction.Menu:           _optionMenu!.IsVisible    = !_optionMenu.IsVisible;     break;
             case KeyConfig.KeyAction.MainMenu:       _optionMenu!.IsVisible    = !_optionMenu.IsVisible;     break;
-            // Social panels — open UserList to the relevant tab
+            // Social panels — open UserList (Friend/Party/Guild/BossParty all surface the same window).
             case KeyConfig.KeyAction.Friends:
-            case KeyConfig.KeyAction.BuddyChat:      _userList!.IsVisible      = !_userList.IsVisible;       break;
-            case KeyConfig.KeyAction.Party:          _userList!.IsVisible      = !_userList.IsVisible;       break;
-            case KeyConfig.KeyAction.Guild:          _userList!.IsVisible      = !_userList.IsVisible;       break;
+            case KeyConfig.KeyAction.Party:
+            case KeyConfig.KeyAction.Guild:
             case KeyConfig.KeyAction.BossParty:      _userList!.IsVisible      = !_userList.IsVisible;       break;
-            // Chat
-            case KeyConfig.KeyAction.Say:
+            // Chat-target hotkeys — open the input pre-set to that group (v95 default D1..D7
+            // = All / Party / Friend / Guild / Alliance / Spouse / Expedition; the v95 client
+            // routes these through CWvsContext::UseFuncKeyMapped → CUIStatusBar::SetChatTarget
+            // then StartChat).
+            case KeyConfig.KeyAction.Say:            _chatBar!.StartChatAs(ChatBar.ChatTargetKind.All);        break;
+            case KeyConfig.KeyAction.PartyChat:      _chatBar!.StartChatAs(ChatBar.ChatTargetKind.Party);      break;
+            case KeyConfig.KeyAction.FriendsChat:    _chatBar!.StartChatAs(ChatBar.ChatTargetKind.Buddy);      break;
+            case KeyConfig.KeyAction.GuildChat:      _chatBar!.StartChatAs(ChatBar.ChatTargetKind.Guild);      break;
+            case KeyConfig.KeyAction.AllianceChat:   _chatBar!.StartChatAs(ChatBar.ChatTargetKind.Alliance);   break;
+            case KeyConfig.KeyAction.SpouseChat:     _chatBar!.StartChatAs(ChatBar.ChatTargetKind.Spouse);     break;
+            case KeyConfig.KeyAction.ExpeditionChat: _chatBar!.StartChatAs(ChatBar.ChatTargetKind.Expedition); break;
+            // Minimize/restore the chat bar (the v95 ";" key — KeyAction.MapleChat — plus the
+            // bottom-bar BtChat button).
             case KeyConfig.KeyAction.ToggleChat:
-            case KeyConfig.KeyAction.MapleChat:      _chatBar!.ToggleMode();                                  break;
+            case KeyConfig.KeyAction.MapleChat:      _chatBar!.ToggleMode();                                   break;
             // Cash Shop — request migration (same connection: server replies with
             // SetCashShop on this socket), then open the local shell.
             case KeyConfig.KeyAction.CashShop:
@@ -3073,6 +3342,40 @@ public sealed class GameStage : Stage
         _equip?.SetPlayerStats(stats.Level, stats.Str, stats.Dex, stats.Int, stats.Luk, stats.JobId);
     }
 
+    // Death trigger — runs after every HP update (StatChanged, local touch damage).
+    // Fires once on the 0-HP transition: locks the avatar in place with Stance.Dead,
+    // spawns the tombstone at the foothold, blocks further input. Idempotent.
+    private void CheckDeath()
+    {
+        if (_isPlayerDead) return;
+        if (_charStats is null || _charStats.Hp > 0) return;
+        if (_physics is null) return;
+
+        _isPlayerDead   = true;
+        _deathPosition  = _physics.Position;
+        _tombstone?.Spawn(_deathPosition);
+        // Snap the avatar pose to "dead" immediately so the body doesn't keep
+        // walking/jumping during the tombstone fall.
+        if (_player != null)
+        {
+            _player.Position = _deathPosition;
+            _player.UpdateFromPhysics(0f, Stance.Dead, _physics.FacingLeft, false);
+        }
+        _logger.LogInformation("Player died at {Pos}", _deathPosition);
+    }
+
+    // Death reset — invoked when SetField arrives after sending the revive packet.
+    // The server has already set HP to 50 (or full for premium) and warped us to
+    // the returnMap; SetField's CharacterStat will refresh _charStats.Hp on its own.
+    private void ResetDeath()
+    {
+        if (!_isPlayerDead) return;
+        _isPlayerDead = false;
+        _tombstone?.Reset();
+        _revivePanel?.Close();
+        _logger.LogInformation("Player revived — death state cleared.");
+    }
+
     // Prefer the StringPool job name; fall back to the built-in table for jobs
     // not yet mapped to a pool id (no regression).
     private string JobName(int jobId) =>
@@ -3138,51 +3441,62 @@ public sealed class GameStage : Stage
         var maxX = facingLeft ? pos.X : pos.X + MeleeReachX;
         var minY = pos.Y - MeleeReachY * 2; // mobs sit on the ground; bias the box upward
         var maxY = pos.Y + MeleeReachY;
+        var swingRect = new Rectangle((int)minX, (int)minY, (int)(maxX - minX), (int)(maxY - minY));
 
-        var targets = new List<MeleeTarget>(MaxMeleeTargets);
+        // Basic melee swing hits exactly ONE mob - the CLOSEST in range. Skills define
+        // their own per-swing target count via SKILLLEVELDATA::nMobCount (1..15); the
+        // protocol upper cap stays at MaxMeleeTargets=15 (CMobPool::FindHitMobInRect
+        // apMob[15] per the v95 IDB), and skill attacks will use that when they land.
+        //
+        // Range gate: rectangle-vs-rectangle intersection between the swing rect above
+        // and the mob's per-frame body rect (from Mob.wz lt/rb on the current animation
+        // canvas). Matches CMobPool::FindHitMobInRect, which intersects the input rect
+        // against CMob::GetBodyRect (m_rcBody / m_rcBodyFlip translated by the mob's
+        // foot position). The old point-in-strip gate counted any mob whose foot
+        // landed inside the swing strip, which read as "mob hitbox too big".
+        MobLook? closest = null;
+        var bestDist = float.MaxValue;
         foreach (var mob in _mobs.Values)
         {
-            if (mob.IsDead)
-            {
-                continue;
-            }
+            if (mob.IsDead) continue;
             var mp = mob.Position;
-            if (mp.X < minX || mp.X > maxX || mp.Y < minY || mp.Y > maxY)
-            {
-                continue;
-            }
-            // Client-chosen damage; the v95 Kinoko server trusts it (no
-            // server-side recompute). Scale it by the character's job/level/stats
-            // via MeleeDamage.Estimate so a stronger character hits harder, then
-            // roll within that window. A 1-hit swing → one damage int per mob.
+            var hit = mob.GetWorldHitRect() ?? MobFallbackRect(mp);
+            if (!swingRect.Intersects(hit)) continue;
+            var d = Vector2.DistanceSquared(pos, mp);
+            if (d < bestDist) { bestDist = d; closest = mob; }
+        }
+
+        var targets = new List<MeleeTarget>(1);
+        if (closest is not null)
+        {
+            var mp = closest.Position;
+            // Client-chosen damage; the v95 Kinoko server trusts it (no server-side
+            // recompute). Scale by job/level/stats via MeleeDamage.Estimate, then roll
+            // within that window. A 1-hit basic swing -> one damage int.
             var (dmgMin, dmgMax) = MeleeDamage.Estimate(
                 _charStats.JobId, Math.Max(1, _charStats.Level),
                 _charStats.Str, _charStats.Dex, _charStats.Int, _charStats.Luk);
             var dmg = _attackRng.Next(dmgMin, dmgMax + 1);
             targets.Add(new MeleeTarget
             {
-                MobId = mob.MobId,
-                HitX = (short)mp.X,
-                HitY = (short)mp.Y,
-                Delay = 0,
+                MobId  = closest.MobId,
+                HitX   = (short)mp.X,
+                HitY   = (short)mp.Y,
+                Delay  = 0,
                 Damage = new[] { dmg },
             });
 
             // Local hit feedback - the server only echoes MobHPIndicator(298) back to the
             // attacker (no MobDamaged broadcast to the hitter), so the hit anim / damage
             // number / aggro flip / mob knockback are all driven locally from here.
-            mob.OnHit(dmg);
-            _dmgNumbers?.Add(dmg, mob.Position, DamageNumber.Kind.MobDamage);
-            if (_mobCtl.TryGetValue(mob.MobId, out var hitCtl))
+            closest.OnHit(dmg);
+            _mobSounds?.PlayDamage(closest.TemplateId);   // Sound.wz/Mob.img/<id>/Damage
+            _dmgNumbers?.Add(dmg, closest.Position + new Vector2(0, -60), DamageNumber.Kind.MobDamage);
+            if (_mobCtl.TryGetValue(closest.MobId, out var hitCtl))
             {
                 hitCtl.OnDamagedByPlayer();
-                var pushDir = mob.Position.X >= pos.X ? +1f : -1f;
+                var pushDir = closest.Position.X >= pos.X ? +1f : -1f;
                 hitCtl.ApplyHitKnockback(pushDir * 25f);
-            }
-
-            if (targets.Count >= MaxMeleeTargets)
-            {
-                break;
             }
         }
 
@@ -3216,7 +3530,11 @@ public sealed class GameStage : Stage
 
     private void SpawnNpc(int id, Vector2 worldPos, string name)
     {
-        var npc = new NpcLook(id, worldPos, Game.Font) { Name = name };
+        var npc = new NpcLook(id, worldPos, Game.Font)
+        {
+            Name  = name,
+            Layer = _field?.LayerAt(worldPos.X, worldPos.Y) ?? 7,
+        };
         npc.Load(_loader!, _npcWz);
         AttachAmbientSpeak(npc, id);
         _npcs.Add(npc);

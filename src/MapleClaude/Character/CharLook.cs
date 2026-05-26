@@ -63,6 +63,12 @@ public sealed class CharLook
 
     // Physics (used only for the pre-SetField demo movement on the title path).
     public Vector2 Position { get; set; }
+
+    /// <summary>Render layer (0..7), the WZ layer of the foothold the player is standing on. Updated each
+    /// frame by GameStage from the owning <see cref="PlayerController.CurrentFoothold"/> so the local player
+    /// renders inside the right per-layer pass (a layer-2 player visibly walks behind a layer-4 tree).
+    /// Defaults to 7 (always-visible top) before the first foothold landing.</summary>
+    public int Layer { get; set; } = 7;
     private Vector2 _velocity;
     private bool _onGround = true;
     private const float Gravity = 980f;

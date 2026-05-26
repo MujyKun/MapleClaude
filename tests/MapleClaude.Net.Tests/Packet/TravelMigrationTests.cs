@@ -83,6 +83,42 @@ public class TravelMigrationTests
         p.Remaining.Should().Be(0);
     }
 
+    // ── Revive (C→S) — empty-portal UserTransferFieldRequest with premium byte ───
+    // Kinoko MigrationHandler routes any UserTransferFieldRequest with an empty
+    // portalName to handleRevive when user.getHp() <= 0. The wire form is identical
+    // to TransferField with an empty portal, but bPremium can be 0 (town revive,
+    // server warps to returnMap with HP=50) or 1 (SoulStone / Wheel of Destiny,
+    // server stays on field with full HP).
+
+    [Fact]
+    public void Revive_TownDefault_Encodes_EmptyPortalAndZeroPremium()
+    {
+        var p = new InPacket(GameSender.Revive(fieldKey: 5, premium: false).ToArray());
+        p.ReadShort().Should().Be((short)InHeader.UserTransferFieldRequest);
+        p.ReadByte().Should().Be(5);            // fieldKey
+        p.ReadInt().Should().Be(0);             // targetField (ignored on revive)
+        p.ReadString().Should().Be("");         // empty portal → revive branch
+        // No x/y when portal is empty (matches Kinoko MigrationHandler line 247-251).
+        p.ReadByte().Should().Be(0);            // unused
+        p.ReadByte().Should().Be(0);            // bPremium = false → town revive
+        p.ReadByte().Should().Be(0);            // bChase
+        p.Remaining.Should().Be(0);
+    }
+
+    [Fact]
+    public void Revive_Premium_FlipsTheSeventhByte()
+    {
+        var p = new InPacket(GameSender.Revive(fieldKey: 5, premium: true).ToArray());
+        p.ReadShort().Should().Be((short)InHeader.UserTransferFieldRequest);
+        p.ReadByte().Should().Be(5);
+        p.ReadInt().Should().Be(0);
+        p.ReadString().Should().Be("");
+        p.ReadByte().Should().Be(0);            // unused
+        p.ReadByte().Should().Be(1);            // bPremium = true → SoulStone / Wheel of Destiny
+        p.ReadByte().Should().Be(0);            // bChase
+        p.Remaining.Should().Be(0);
+    }
+
     // ── Cash-shop migrate request + return (C→S) ─────────────────────────────────
 
     [Fact]

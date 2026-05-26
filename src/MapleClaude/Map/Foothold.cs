@@ -56,6 +56,27 @@ public sealed class Foothold
         return Y1 + t * (Y2 - Y1);
     }
 
+    /// <summary>Closest point on this segment to (<paramref name="x"/>, <paramref name="y"/>) — the
+    /// perpendicular foot clamped to the segment's [X1,Y1]→[X2,Y2] span. Used for stuck-below-map rescue
+    /// where the player has fallen past all floors and we need to snap them onto the nearest one.</summary>
+    public Vector2 ClosestPoint(float x, float y)
+    {
+        float dx = X2 - X1, dy = Y2 - Y1;
+        var len2 = dx * dx + dy * dy;
+        if (len2 < 1f) return new Vector2(X1, Y1);
+        var t = Math.Clamp(((x - X1) * dx + (y - Y1) * dy) / len2, 0f, 1f);
+        return new Vector2(X1 + t * dx, Y1 + t * dy);
+    }
+
+    /// <summary>Squared distance from this segment to (<paramref name="x"/>, <paramref name="y"/>).
+    /// Squared (not Euclidean) so a nearest-foothold scan stays branch-free of a per-candidate sqrt.</summary>
+    public float DistanceSquaredTo(float x, float y)
+    {
+        var p = ClosestPoint(x, y);
+        var dx = x - p.X; var dy = y - p.Y;
+        return dx * dx + dy * dy;
+    }
+
     public Vector2 StartPoint => new(X1, Y1);
     public Vector2 EndPoint => new(X2, Y2);
 }

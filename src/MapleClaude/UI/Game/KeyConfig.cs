@@ -49,13 +49,18 @@ public sealed class KeyConfig : GamePanel
         GuildChat         = 18,
         Party             = 19,
         Notifier          = 20,
-        MapleNews         = 21,
+        // Chat targets (v95 CWvsContext::UseFuncKeyMapped → CUIStatusBar::SetChatTarget).
+        // Menu IDs 10/12/13/18/21/24/29 are the "To <X>" hotkeys; the comments give the
+        // numeric chat-target value the v95 client passes to SetChatTarget. The default
+        // GMS v95 keymap places them on D1..D7 in this order: All, Party, Friend, Guild,
+        // Alliance, Spouse, Expedition.
+        SpouseChat        = 21,   // → SetChatTarget(6)
         CashShop          = 22,
-        AllianceChat      = 23,
-        BuddyChat         = 24,
+        AllianceChat      = 24,   // → SetChatTarget(5)  (was misnamed BuddyChat)
         ManageLegion      = 25,
         Family            = 26,   // v95 menu id 26 (keyconfig icon "FAMILY TAB"); default key F
         BossParty         = 27,
+        ExpeditionChat    = 29,   // → SetChatTarget(3)
         CharInfo          = 44,
         ChangeChannel     = 45,
         MainMenu          = 46,

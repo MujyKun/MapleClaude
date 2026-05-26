@@ -198,6 +198,34 @@ public static class GameSender
         return p;
     }
 
+    // Revive: UserTransferFieldRequest(41) with empty portal name. The server's
+    // MigrationHandler.handleUserTransferFieldRequest sees the empty portalName,
+    // verifies user.getHp() <= 0, and routes to handleRevive — warping to the
+    // field's returnMap (premium=false → HP=50) or staying on the current field
+    // (premium=true → full HP, requires SoulStone or Wheel of Destiny).
+    //
+    // Wire form (kinoko MigrationHandler lines 247-258):
+    //   byte  fieldKey
+    //   int   0            (targetField — ignored when portal is empty)
+    //   short 0            (empty string length; no ASCII payload follows)
+    //   byte  0            (unused)
+    //   byte  premium
+    //   byte  0            (bChase — false skips the trailing 8 bytes)
+    //
+    // The server reads (x, y) only when portalName is non-empty, so we skip them.
+    // Matches CUIRevive::Revive(bPremium) → CField::SendTransferFieldRequest(0, 0, bPremium, 0, 0).
+    public static OutPacket Revive(byte fieldKey, bool premium)
+    {
+        var p = OutPacket.Of(InHeader.UserTransferFieldRequest);
+        p.WriteByte(fieldKey);
+        p.WriteInt(0);                       // dwTargetField (ignored on revive)
+        p.WriteString(string.Empty);         // sPortal — empty triggers revive branch
+        p.WriteByte(0);                      // (unused)
+        p.WriteByte(premium);                // bPremium
+        p.WriteByte(0);                      // bChase
+        return p;
+    }
+
     // UserMigrateToCashShopRequest(43): int update_time. The cash shop runs on the
     // SAME connection — the server replies with SetCashShop + load packets.
     public static OutPacket MigrateToCashShop()
@@ -264,7 +292,8 @@ public static class GameSender
     //   byte knockback (1 = no knockback), [reflect block omitted], byte stance.
     // For a basic body-touch hit attackIndex = 0 (the body-attack index in MobAttack).
     public static OutPacket UserHit(byte attackIndex, byte magicElemAttr, int damage,
-                                    int templateId, int mobId, byte dir, byte knockback = 1)
+                                    int templateId, int mobId, byte dir, byte knockback = 1,
+                                    short userX = 0, short userY = 0)
     {
         var p = OutPacket.Of(InHeader.UserHit);
         p.WriteInt(0);                       // get_update_time()
@@ -277,13 +306,20 @@ public static class GameSender
         p.WriteByte(0);                      // nX = 0   (reflect)
         p.WriteByte(0);                      // bGuard
         p.WriteByte(knockback);              // (bKnockback != 0) + 1   ->   1 = none, 2 = knockback
-        // reflect block skipped: only sent when knockback > 1 || reflect != 0. Sending the
-        // reflect block when knockback==2 would be authentic to the real client, but
-        // Kinoko's HitHandler enters that block iff `knockback > 1 || reflect != 0` — so
-        // for our basic body-touch case we'd need ALL the reflect fields zeroed. Skipping
-        // the block keeps the wire shorter; the server reads through the `else` path and
-        // never references the reflect/power-guard fields. If knockback validation later
-        // requires the block, expand here.
+        // Reflect block (14 bytes) — REQUIRED when knockback > 1 || reflect != 0. Kinoko's
+        // HitHandler reads it conditionally; omitting it when knockback > 1 makes the server
+        // overrun its packet buffer (BufferUnderflowException). We always pass reflect=0 here
+        // (no skill-reflect support yet), so the condition reduces to knockback > 1.
+        if (knockback > 1)
+        {
+            p.WriteByte(0);                  // bPowerGuard
+            p.WriteInt(0);                   // dwReflectMobID
+            p.WriteByte(0);                  // bReflectMobAction
+            p.WriteShort(0);                 // ptHit.x  (mob hit point — we don't reflect, so 0)
+            p.WriteShort(0);                 // ptHit.y
+            p.WriteShort(userX);             // this->GetPos()->x  (player position)
+            p.WriteShort(userY);             // this->GetPos()->y
+        }
         p.WriteByte(0);                      // bStance | (nSkillID_Stance == 33101006 ? 2 : 0)
         return p;
     }

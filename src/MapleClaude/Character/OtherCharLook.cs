@@ -22,6 +22,12 @@ public sealed class OtherCharLook
     public AvatarLook? Look   { get; }
 
     public Vector2   Position { get; set; }
+
+    /// <summary>Render layer (0..7), the WZ layer of the foothold this remote player is standing on. Updated
+    /// by the UserMove handler from the foothold id the server forwards. Defaults to 7 (always-visible top)
+    /// before the first move packet lands.</summary>
+    public int       Layer    { get; set; } = 7;
+
     private bool     _facingLeft;
 
     private CharLook? _sprites;

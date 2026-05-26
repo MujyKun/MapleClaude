@@ -65,14 +65,25 @@ public sealed class WzTextureLoader : IDisposable
         var texture = new Texture2D(_device, canvas.Width, canvas.Height, mipmap: false, SurfaceFormat.Color);
         texture.SetData(pixels.ToArray());
 
-        // Read origin from canvas property tree if present.
+        // Read origin + the optional per-frame hit/body rect (lt/rb) from the canvas
+        // property tree. lt/rb appear on Mob.wz/Character.wz/Npc.wz canvas frames and
+        // define the foot-relative AABB the v95 client uses for hit-tests
+        // (CMob::m_rcBody is precomputed from these); UI canvases generally don't
+        // author them, so they stay null.
         var origin = Vector2.Zero;
         if (canvas.Property.Get("origin") is WzVector v)
         {
             origin = new Vector2(v.X, v.Y);
         }
 
-        var sprite = new WzSprite(texture, origin);
+        Vector2? lt = canvas.Property.Get("lt") is WzVector vlt
+            ? new Vector2(vlt.X, vlt.Y)
+            : null;
+        Vector2? rb = canvas.Property.Get("rb") is WzVector vrb
+            ? new Vector2(vrb.X, vrb.Y)
+            : null;
+
+        var sprite = new WzSprite(texture, origin, lt, rb);
         _cache[canvas] = sprite;
         return sprite;
     }
