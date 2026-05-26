@@ -26,7 +26,7 @@ public sealed class FieldHandlers
 
     // ── Mobs ─────────────────────────────────────────────────────────────────
     public event Action<MobEnterArgs>?          OnMobEnter;
-    public event Action<int>?                   OnMobLeave;    // mobId
+    public event Action<int, byte>?             OnMobLeave;    // mobId, leaveType: 0=fade, 1=remove, 2=die
     public event Action<MobMoveArgs>?           OnMobMove;
     public event Action<MobDamagedArgs>?        OnMobDamaged;
     /// <summary>int mobId, bool isControl (true = client must send MobMove for this mob).</summary>
@@ -616,9 +616,9 @@ public sealed class FieldHandlers
 
     private void HandleMobLeave(InPacket p)
     {
-        var mobId    = p.ReadInt();
-        var leaveType = p.ReadByte();   // 0=fade,1=remove,2=die
-        OnMobLeave?.Invoke(mobId);
+        var mobId     = p.ReadInt();
+        var leaveType = p.ReadByte();   // 0=fade, 1=remove, 2=die
+        OnMobLeave?.Invoke(mobId, leaveType);
     }
 
     private void HandleMobChangeController(InPacket p)
@@ -728,7 +728,7 @@ public sealed class FieldHandlers
             OnNpcEnter?.Invoke(new NpcEnterArgs
             {
                 ObjId = objId, TemplateId = templateId,
-                X = x, Y = y, FacingLeft = facingLeft,
+                X = x, Y = y, FhId = foothold, FacingLeft = facingLeft,
             });
         }
         catch (Exception ex)
@@ -1629,6 +1629,7 @@ public sealed class NpcEnterArgs
 {
     public int   ObjId, TemplateId;
     public short X, Y;
+    public short FhId;
     public bool  FacingLeft;
 }
 

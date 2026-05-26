@@ -22,6 +22,11 @@ public sealed class DropSprite
     public int     ItemIdOrAmount  { get; }
     public Vector2 Position        { get; private set; }
 
+    /// <summary>Render layer (0..7), the WZ layer of the foothold this drop lands on. Set once at spawn from
+    /// <c>FieldScene.LayerAt</c> using the landing point. Drops are then ground-fixed, so this never
+    /// changes.</summary>
+    public int     Layer           { get; set; } = 7;
+
     private const float Vy = 400f;   // initial toss velocity (CDropPool uses 400; 720 for special own-types)
 
     private readonly Vector2 _source;   // pt1 — toss origin

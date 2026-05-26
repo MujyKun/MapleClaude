@@ -30,6 +30,10 @@ public sealed class NpcLook
     // World-space position (feet)
     public Vector2 Position { get; set; }
 
+    /// <summary>Render layer (0..7), the WZ layer of the foothold this NPC is standing on. Set once at spawn
+    /// from <c>FieldScene.LayerAt(x, y)</c>. NPCs are stationary, so this never changes after spawn.</summary>
+    public int Layer { get; set; } = 7;
+
     private bool _facingLeft;
     private bool _loaded;
 

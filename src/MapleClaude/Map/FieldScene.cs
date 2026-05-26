@@ -368,7 +368,13 @@ public sealed class FieldScene
         if (b.Info.Type is BackType.VMoveA or BackType.VMoveB) b.ScrollY += b.Info.Ry * dtSec;
     }
 
-    public void Draw(SpriteBatch sb, Texture2D whitePixel, int screenWidth, int screenHeight)
+    /// <summary>Render the field: parallax backs, then each of the 8 layers in order (its tiles, then its
+    /// objs, then optionally any dynamic entities the caller wants painted inside that layer's pass), then
+    /// parallax fronts, then portal swirls. Pass <paramref name="drawEntitiesForLayer"/> to interleave
+    /// mobs/NPCs/drops/players into the per-layer pass — without it, the field draws just the static map
+    /// content (useful for the pre-game preview in <c>FieldStage</c>).</summary>
+    public void Draw(SpriteBatch sb, Texture2D whitePixel, int screenWidth, int screenHeight,
+                     Action<int>? drawEntitiesForLayer = null)
     {
         if (!_loaded)
         {
@@ -391,6 +397,10 @@ public sealed class FieldScene
                 var fx = o.Info.Flip ? SpriteEffects.FlipHorizontally : SpriteEffects.None;
                 o.Sprite.Draw(sb, WorldToScreen(o.Info.X, o.Info.Y, center), fx);
             }
+            // Dynamic entities for this layer (NPCs / mobs / drops / chars) draw above the layer's tiles+objs
+            // and below the next layer's, mirroring the v95 client's CMapleStage::Draw loop. Skipped when the
+            // caller didn't pass a callback (e.g. FieldStage's pre-game preview has no entities yet).
+            drawEntitiesForLayer?.Invoke(layer);
         }
 
         foreach (var b in _fronts) DrawBackground(sb, b, center, screenWidth, screenHeight);
@@ -478,6 +488,21 @@ public sealed class FieldScene
     /// <summary>Foothold by id, or null.</summary>
     public Foothold? GetFoothold(int id) => _footholds.TryGetValue(id, out var fh) ? fh : null;
 
+    /// <summary>Render layer (0..7, the WZ layer the foothold sits under in Map.wz) of the foothold with this
+    /// id. <c>fallback</c> is returned for id 0 (unknown / not yet grounded) or an unrecognized id. Used by
+    /// dynamic entities (mobs, NPCs, drops, players) to follow the v95 per-layer draw model: an entity renders
+    /// inside its current foothold's layer pass, so a tree in layer 4 visibly occludes a player whose foothold
+    /// is in layer 2.</summary>
+    public int LayerOfFoothold(int id, int fallback = 7)
+        => _footholds.TryGetValue(id, out var fh) ? fh.Layer : fallback;
+
+    /// <summary>Render layer at world point (<paramref name="x"/>, <paramref name="y"/>): the WZ layer of the
+    /// nearest standable floor directly below the point. Use this for entities that don't carry a foothold id
+    /// (NPCs, ground drops, freshly spawned mobs). Returns <paramref name="fallback"/> when nothing walkable
+    /// sits below the point.</summary>
+    public int LayerAt(float x, float y, int fallback = 7)
+        => GetFootholdBelow(x, y) is { } fh ? fh.Layer : fallback;
+
     /// <summary>The nearest standable floor at or below <paramref name="y"/> directly under
     /// <paramref name="x"/> — the foothold a falling or spawning character should land on. Skips walls
     /// (vertical footholds, X1==X2). Returns null when there is no ground below the point.</summary>
@@ -490,6 +515,24 @@ public sealed class FieldScene
             if (fh.X1 == fh.X2) continue;           // wall, not ground
             if (fh.YAt(x) is not { } gy) continue;  // x outside this segment
             if (gy >= y && gy < bestY) { bestY = gy; best = fh; }
+        }
+        return best;
+    }
+
+    /// <summary>The walkable foothold whose line segment is closest to (<paramref name="x"/>,
+    /// <paramref name="y"/>) by squared perpendicular distance. Skips walls (X1==X2). Used by the
+    /// stuck-below-map rescue path: when a player has fallen past every floor and is pinned at the bottom
+    /// of <see cref="Bounds"/>, the closest floor segment is the safest place to snap them onto. Returns
+    /// null only when the map has no walkable footholds at all.</summary>
+    public Foothold? GetClosestFoothold(float x, float y)
+    {
+        Foothold? best = null;
+        var bestDist = float.PositiveInfinity;
+        foreach (var (_, fh) in _footholds)
+        {
+            if (fh.IsWall) continue;
+            var d = fh.DistanceSquaredTo(x, y);
+            if (d < bestDist) { bestDist = d; best = fh; }
         }
         return best;
     }

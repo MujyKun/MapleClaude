@@ -41,6 +41,34 @@ public sealed class GamePacketHandler
     /// <c>StatChanged</c> bursts. Never replaced, only mutated in place.</summary>
     private readonly CharStats _snapshot = new();
 
+    /// <summary>Seed the persistent snapshot from the authoritative full
+    /// <c>CharacterStat</c> block carried by the migrate <c>SetField</c>.
+    /// Without this seed, the first partial <c>StatChanged</c> burst (e.g. an
+    /// HP-only change from damage / regen / a money tick) would replace the
+    /// in-game <c>_charStats</c> with a snapshot whose unmasked fields are
+    /// still zero, zeroing the visible Level / MaxHP / MaxMP on the HUD and
+    /// Stat window. Call from <c>GameStage.OnSetField</c> right after building
+    /// the seeded <c>_charStats</c>.</summary>
+    public void SeedSnapshot(CharStats seed)
+    {
+        _snapshot.Name  = seed.Name;
+        _snapshot.Level = seed.Level;
+        _snapshot.JobId = seed.JobId;
+        _snapshot.Str   = seed.Str;
+        _snapshot.Dex   = seed.Dex;
+        _snapshot.Int   = seed.Int;
+        _snapshot.Luk   = seed.Luk;
+        _snapshot.Hp    = seed.Hp;
+        _snapshot.MaxHp = seed.MaxHp;
+        _snapshot.Mp    = seed.Mp;
+        _snapshot.MaxMp = seed.MaxMp;
+        _snapshot.Exp   = seed.Exp;
+        _snapshot.AP    = seed.AP;
+        _snapshot.SP    = seed.SP;
+        _snapshot.Fame  = seed.Fame;
+        _snapshot.Guild = seed.Guild;
+    }
+
     /// <summary>Fired after a <c>FuncKeyMappedInit</c> packet is fully decoded;
     /// <see cref="FuncKeyEntries"/> holds the 89-entry array the receiver can feed
     /// into <c>KeyConfig.ApplyServerKeymap</c>.</summary>

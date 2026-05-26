@@ -22,6 +22,12 @@ public sealed class MobLook
     // ── World position ────────────────────────────────────────────────────────
     public Vector2 Position { get; set; }
 
+    /// <summary>Render layer (0..7), the WZ layer of the foothold this mob is standing on. Used by
+    /// GameStage's per-layer draw pass so the mob renders behind/in front of the right Map.wz objs.
+    /// Updated by <see cref="MobController"/> whenever the mob crosses onto a foothold in a different
+    /// layer. Defaults to 7 (the topmost, always-visible layer) for fly mobs / unattached mobs.</summary>
+    public int Layer { get; set; } = 7;
+
     // ── Health (fed by MobDamaged / StatSet packets) ──────────────────────────
     public int Hp    { get; set; } = -1;   // -1 = unknown
     public int MaxHp { get; set; } = -1;
@@ -39,6 +45,14 @@ public sealed class MobLook
 
     /// <summary>Mob level (from MobInfo.Level). Shown alongside the name in the hit tag.</summary>
     public int    Level { get; set; }
+
+    /// <summary>RGB 0xRRGGBB for the over-head HP bar fill (from Mob.wz/info/hpTagColor).
+    /// 0 = fall back to the default green/yellow/red gradient by HP %.</summary>
+    public int    HpTagColor   { get; set; }
+
+    /// <summary>RGB 0xRRGGBB for the over-head HP bar background (from
+    /// Mob.wz/info/hpTagBgcolor). 0 = default dark.</summary>
+    public int    HpTagBgColor { get; set; }
 
     /// <summary>Single shared "I was just hit" timer driving the HP bar AND the name tag
     /// visibility. Reset on every OnHit and SetHpPercent; HitTagVisible is true while &gt; 0.</summary>
@@ -58,8 +72,7 @@ public sealed class MobLook
     private int   _frame;
     private float _frameTimer;
 
-    // ── Damage flash ──────────────────────────────────────────────────────────
-    private float _hitFlash;    // counts down from 0.15s; sprite drawn red-tinted while > 0
+
 
     private static readonly string[] StateNames = ["stand", "move", "attack1", "hit1", "die1"];
     private bool _loaded;
@@ -134,7 +147,6 @@ public sealed class MobLook
 
     public void OnHit(int damage)
     {
-        _hitFlash = 0.15f;
         _hitFeedbackTimer = HitFeedbackDuration;
         SetState(MobState.Hit);
     }
@@ -154,13 +166,55 @@ public sealed class MobLook
 
     public bool IsDead => _dead;
 
+    /// <summary>True once <see cref="OnDie"/> has been called and the die animation is
+    /// playing. Used by GameStage to dedup the die sound when both MobHPIndicator(0%)
+    /// and MobLeaveField(type=2) arrive for the same mob.</summary>
+    public bool IsDying => _curState == MobState.Die;
+
     public void SetFacing(bool facingLeft) => _facingLeft = facingLeft;
+
+    // ── Hit rect ──────────────────────────────────────────────────────────────
+
+    /// <summary>World-space AABB of the current animation frame's hit/body rect,
+    /// derived from the canvas's <c>lt</c>/<c>rb</c> vectors and the mob's foot
+    /// position. Mirrors <c>CMob::GetBodyRect</c> in the v95 client: the precomputed
+    /// foot-relative rect (and its horizontally-mirrored variant) is translated by the
+    /// mob's foot point. Returns <see langword="null"/> when the current frame doesn't
+    /// carry lt/rb (e.g. placeholder render) — callers should fall back to a
+    /// foot-anchored default rect.</summary>
+    public Rectangle? GetWorldHitRect()
+    {
+        if (!_anims.TryGetValue(_curState, out var frames) || frames.Count == 0) return null;
+        var (sprite, _) = frames[Math.Min(_frame, frames.Count - 1)];
+        if (sprite.Lt is not Vector2 lt || sprite.Rb is not Vector2 rb) return null;
+
+        // MobLook draws unflipped when facing left (sprite native facing). Facing
+        // right horizontally mirrors the sprite around the foot, so the body rect
+        // mirrors too: flipped_lt.x = -rb.x, flipped_rb.x = -lt.x.
+        int x = (int)Position.X;
+        int y = (int)Position.Y;
+        int left, right;
+        if (_facingLeft)
+        {
+            left  = x + (int)lt.X;
+            right = x + (int)rb.X;
+        }
+        else
+        {
+            left  = x - (int)rb.X;
+            right = x - (int)lt.X;
+        }
+        int top    = y + (int)lt.Y;
+        int bottom = y + (int)rb.Y;
+        if (right < left)  (left, right)  = (right, left);
+        if (bottom < top)  (top, bottom)  = (bottom, top);
+        return new Rectangle(left, top, right - left, bottom - top);
+    }
 
     // ── Update ────────────────────────────────────────────────────────────────
 
     public void Update(float dt)
     {
-        if (_hitFlash > 0)         _hitFlash         = Math.Max(0, _hitFlash         - dt);
         if (_hitFeedbackTimer > 0) _hitFeedbackTimer = Math.Max(0, _hitFeedbackTimer - dt);
 
         if (!_anims.TryGetValue(_curState, out var frames) || frames.Count == 0) return;
@@ -186,7 +240,7 @@ public sealed class MobLook
     public void Draw(SpriteBatch sb, Texture2D white, Vector2 screenPos)
     {
         var flip = _facingLeft ? SpriteEffects.None : SpriteEffects.FlipHorizontally;
-        var tint = _hitFlash > 0 ? new Color(255, 100, 100) : Color.White;
+        var tint = Color.White;
 
         if (_loaded && _anims.TryGetValue(_curState, out var frames) && frames.Count > 0)
         {
@@ -218,23 +272,39 @@ public sealed class MobLook
     private void DrawHpBar(SpriteBatch sb, Texture2D white, Vector2 screenPos)
     {
         // MobHPIndicator(298) only fires for hits WE land, so the server's HpPercent push is
-        // the most authoritative source. Fall back to absolute Hp/MaxHp from MobDamaged (which
-        // we receive for other players' attacks). HitTagVisible gates auto-hide.
+        // the most authoritative source. Fall back to absolute Hp/MaxHp from MobDamaged
+        // (which we receive for other players' attacks). HitTagVisible gates auto-hide.
         float pct;
         if (HpPercent >= 0 && HitTagVisible) pct = HpPercent / 100f;
         else if (Hp >= 0 && MaxHp > 0)       pct = (float)Hp / MaxHp;
         else return;
         pct = Math.Clamp(pct, 0f, 1f);
 
-        const int BarW = 42;
+        const int BarW = 50;
         const int BarH = 5;
         var bx = (int)(screenPos.X - BarW / 2f);
-        var by = (int)(screenPos.Y - PlaceholderH - 8);
-        sb.Draw(white, new Rectangle(bx, by, BarW, BarH), new Color(0, 0, 0, 160));
+        var by = (int)(screenPos.Y - PlaceholderH - 12);
+
+        // 1 px dark outline so the bar reads on any background.
+        sb.Draw(white, new Rectangle(bx - 1, by - 1, BarW + 2, BarH + 2), new Color(0, 0, 0, 220));
+
+        // Background: hpTagBgcolor when set (the v95 client uses the per-mob tag color so
+        // e.g. boss bars use their authored palette), otherwise a darkened ink.
+        var bgColor = HpTagBgColor != 0 ? FromRgb(HpTagBgColor, 200) : new Color(20, 20, 20, 220);
+        sb.Draw(white, new Rectangle(bx, by, BarW, BarH), bgColor);
+
+        // Fill: hpTagColor when set; otherwise the green/yellow/red gradient by HP %.
+        var fillColor = HpTagColor != 0
+            ? FromRgb(HpTagColor, 255)
+            : pct > 0.5f  ? new Color(80,  200, 80)
+            : pct > 0.25f ? new Color(220, 180, 40)
+                          : new Color(220, 60,  60);
         var fillW = (int)(BarW * pct);
-        var barColor = pct > 0.5f ? new Color(80, 200, 80) : pct > 0.25f ? new Color(220, 180, 40) : new Color(220, 60, 60);
-        if (fillW > 0) sb.Draw(white, new Rectangle(bx, by, fillW, BarH), barColor);
+        if (fillW > 0) sb.Draw(white, new Rectangle(bx, by, fillW, BarH), fillColor);
     }
+
+    private static Color FromRgb(int rgb, byte alpha)
+        => new Color((rgb >> 16) & 0xFF, (rgb >> 8) & 0xFF, rgb & 0xFF, (int)alpha);
 
     private static WzSprite? LoadFrame(WzTextureLoader loader, WzProperty frameNode)
     {

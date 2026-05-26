@@ -26,8 +26,11 @@ namespace MapleClaude.UI.Game;
 /// </summary>
 public sealed class ChatBar : GamePanel
 {
-    /// <summary>Outgoing send target — drives GameStage's default (no-slash) routing.</summary>
-    public enum ChatTargetKind { All, Buddy, Party, Guild, Alliance, Expedition }
+    /// <summary>Outgoing send target — drives GameStage's default (no-slash) routing.
+    /// The first six map 1:1 to the icons in <c>UI.wz/StatusBar2.img/mainBar/chatTarget</c>
+    /// (the dropup); <see cref="Spouse"/> has no dropup icon and is only reachable via
+    /// the <c>To Spouse</c> hotkey (KeyAction.SpouseChat).</summary>
+    public enum ChatTargetKind { All, Buddy, Party, Guild, Alliance, Expedition, Spouse }
 
     /// <summary>Per-line channel used for the filter tabs (mirrors <c>CChatLog::m_nType</c> bits).</summary>
     public enum ChatLineType { Normal, Buddy, Party, Guild, Alliance, Expedition, System, Whisper }
@@ -54,7 +57,10 @@ public sealed class ChatBar : GamePanel
     // ── WZ assets ────────────────────────────────────────────────────────────────
     private readonly WzSprite? _chatSpace, _chatSpace2, _chatEnter, _chatCover;       // backgrounds
     private readonly Button? _dropBase;                                               // chatTarget/base (4-state)
-    private readonly WzSprite?[] _icons = new WzSprite?[6];                           // all/friend/party/...
+    // 6 dropup icons (all/friend/party/guild/association/expedition) + a 7th null slot
+    // for Spouse — the v95 client has no chatTarget canvas for Spouse, but the hotkey
+    // can still put the bar in that mode, so we index by ChatTargetKind safely.
+    private readonly WzSprite?[] _icons = new WzSprite?[7];
     private readonly Button? _btOpen, _btClose, _btScrollUp, _btScrollDown;           // mainBar arrows
     private readonly TabButton?[] _tabs = new TabButton?[6];                          // chat/Tap (5-state)
     private readonly WzSprite? _tapBar, _tapBarOver;                                  // tab strip / drag-grip hint
@@ -159,6 +165,17 @@ public sealed class ChatBar : GamePanel
             _restoreMode = _mode;
             SetMode(ChatMode.Minimized);
         }
+    }
+
+    /// <summary>Switch the send target to <paramref name="target"/> and open the chat input
+    /// (the v95 "To &lt;group&gt;" hotkeys — <c>CWvsContext::UseFuncKeyMapped</c> menu IDs
+    /// 10/12/13/18/21/24/29 — which call <c>CUIStatusBar::SetChatTarget</c> then
+    /// <c>StartChat</c>). Reopens the bar from Minimized first.</summary>
+    public void StartChatAs(ChatTargetKind target)
+    {
+        Target = target;
+        _dropOpen = false;
+        StartChat();
     }
 
     /// <summary>True while the mouse is over the expanded log's drag grip, or the grip is being
