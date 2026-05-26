@@ -52,6 +52,7 @@ public sealed class MiniMap : GamePanel
     private Mode _mode = Mode.Normal;
     private string _mapName   = string.Empty;
     private string _streetName = string.Empty;
+    private int _mapId;
     private MiniMapData? _data;
 
     // Per-frame entity feed (world coordinates).
@@ -94,11 +95,12 @@ public sealed class MiniMap : GamePanel
     // ── Feed (called by GameStage) ──────────────────────────────────────────────
 
     /// <summary>Bind the active field's minimap data + names. Call on SetField.</summary>
-    public void SetField(MiniMapData? data, string street, string mapName)
+    public void SetField(MiniMapData? data, string street, string mapName, int mapId = 0)
     {
         _data       = data;
         _streetName = street;
         _mapName    = mapName;
+        _mapId      = mapId;
     }
 
     public void SetNpcs(IEnumerable<Vector2> npcs)       { _npcs.Clear();    _npcs.AddRange(npcs); }
@@ -264,6 +266,13 @@ public sealed class MiniMap : GamePanel
         {
             _font.Draw(sb, _streetName, new Vector2(tx, win.Y + 4), new Color(170, 170, 130));
             _font.Draw(sb, _mapName,    new Vector2(tx, win.Y + 4 + _font.LineHeight), Color.White);
+            if (_mapId > 0)
+            {
+                var idText = _mapId.ToString();
+                var idW = (int)_font.Measure(idText).X;
+                var idX = win.Right - ButtonsWidth() - (_maxMap.BorderR) - idW - 4;
+                _font.Draw(sb, idText, new Vector2(idX, win.Y + 4 + _font.LineHeight), new Color(170, 170, 130));
+            }
         }
         else if (!string.IsNullOrEmpty(_mapName))
         {

@@ -1287,7 +1287,7 @@ public sealed class GameStage : Stage
             _camera.Target = _physics.Position;
             _camera.MapBounds = _field.Bounds;   // VR rect when present, else the foothold AABB
             UpdateMapName(targetMap);
-            _miniMap?.SetField(_field.MiniMap, _mapStreet, _mapNameText);
+            _miniMap?.SetField(_field.MiniMap, _mapStreet, _mapNameText, targetMap);
             PlayMapBgm(_field.Info.Bgm);
             _logger.LogInformation("SetField processed - mapId={Map} portal={Portal} money={Money}",
                 targetMap, targetPortal, args.Money);
