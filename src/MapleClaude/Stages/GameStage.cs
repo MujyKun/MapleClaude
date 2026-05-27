@@ -2332,7 +2332,7 @@ public sealed class GameStage : Stage
         }
 
         // Map animation + background autoscroll
-        _field?.Update(dt * 1000.0);
+        _field?.Update(dt * 1000.0, _physics?.Position);
 
         // Drops
         foreach (var drop in _drops.Values) drop.Update(dt);
