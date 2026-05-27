@@ -12,6 +12,7 @@ public sealed class Portal
     public int Y { get; init; }
     public int TargetMap { get; init; }
     public string TargetPortal { get; init; } = string.Empty;
+    public string Image { get; init; } = string.Empty;
     public int Delay { get; init; }
     public bool OnlyOnce { get; init; }
 

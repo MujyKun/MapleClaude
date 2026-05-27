@@ -18,13 +18,24 @@ namespace MapleClaude.Map;
 public sealed class FieldScene
 {
     private const int LayerCount = 8;
+    private const int VisiblePortalType = 2;
+    private const int ChangeablePortalType = 4;
+    private const int ScriptPortalType = 7;
+    private const int HiddenPortalType = 10;
+    private const int ScriptHiddenPortalType = 11;
+    private const int HiddenPortalXRange = 100;
+    private const int HiddenPortalYRange = 50;
+    private const string DefaultHiddenPortalImage = "default";
 
     private readonly ILogger<FieldScene> _logger;
     private readonly WzPackage _mapWz;
     private readonly WzTextureLoader _loader;
     private readonly Dictionary<int, Foothold> _footholds = new();
     private readonly Dictionary<int, Portal> _portals = new();
-    private AnimatedSprite? _portalPv;   // visible-portal (type 2) swirl: Map.wz/MapHelper.img/portal/game/pv
+    private readonly Dictionary<string, AnimatedSprite?> _portalPh = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, AnimatedSprite?> _portalPsh = new(StringComparer.Ordinal);
+    private AnimatedSprite? _portalPv;   // visible/changeable/script portal: Map.wz/MapHelper.img/portal/game/pv
+    private int? _activeHiddenPortalIndex;
     private readonly List<LadderRope> _ladderRopes = new();
     private MapInfo _info = new();
     private Rectangle _bounds = new(-3000, -2000, 6000, 4000);
@@ -109,8 +120,9 @@ public sealed class FieldScene
         AssignZMass();
         ComputeBounds();
         LoadPortals(root);
-        // Visible portals (type 2) render the animated "pv" swirl from the shared MapHelper image.
+        // In-game portal animations from MapHelper.img/portal/game, selected by WZ portal type (pt).
         _portalPv = _loader.LoadAnimation(_mapWz.GetItem("MapHelper.img/portal/game/pv"));
+        LoadHiddenPortalAnimations();
         LoadLadderRope(root);
         try
         {
@@ -256,9 +268,32 @@ public sealed class FieldScene
                 Y = ReadInt(entry, "y"),
                 TargetMap = ReadInt(entry, "tm"),
                 TargetPortal = entry.Get("tn")?.ToString() ?? string.Empty,
+                Image = entry.Get("image")?.ToString() ?? string.Empty,
                 Delay = ReadInt(entry, "delay"),
                 OnlyOnce = ReadInt(entry, "onlyOnce") != 0,
             };
+        }
+    }
+
+    private void LoadHiddenPortalAnimations()
+    {
+        _portalPh.Clear();
+        _portalPsh.Clear();
+        foreach (var (_, portal) in _portals)
+        {
+            if (portal.Type is not (HiddenPortalType or ScriptHiddenPortalType))
+            {
+                continue;
+            }
+
+            var image = HiddenPortalImage(portal);
+            var cache = portal.Type == HiddenPortalType ? _portalPh : _portalPsh;
+            if (!cache.ContainsKey(image))
+            {
+                var family = portal.Type == HiddenPortalType ? "ph" : "psh";
+                cache[image] = _loader.LoadAnimation(
+                    _mapWz.GetItem($"MapHelper.img/portal/game/{family}/{image}/portalContinue"));
+            }
         }
     }
 
@@ -349,7 +384,7 @@ public sealed class FieldScene
     // ── Per-frame update + draw ──────────────────────────────────────────────────
 
     /// <summary>Advances background/object animations and background autoscroll.</summary>
-    public void Update(double dtMs)
+    public void Update(double dtMs, Vector2? playerPosition = null)
     {
         foreach (var b in _backs) UpdateBack(b, dtMs);
         foreach (var b in _fronts) UpdateBack(b, dtMs);
@@ -358,6 +393,9 @@ public sealed class FieldScene
             foreach (var o in layer) o.Sprite?.Update(dtMs);
         }
         _portalPv?.Update(dtMs);
+        foreach (var (_, anim) in _portalPh) anim?.Update(dtMs);
+        foreach (var (_, anim) in _portalPsh) anim?.Update(dtMs);
+        UpdateHiddenPortal(playerPosition);
     }
 
     private static void UpdateBack(BackDraw b, double dtMs)
@@ -397,6 +435,7 @@ public sealed class FieldScene
                 var fx = o.Info.Flip ? SpriteEffects.FlipHorizontally : SpriteEffects.None;
                 o.Sprite.Draw(sb, WorldToScreen(o.Info.X, o.Info.Y, center), fx);
             }
+            DrawPortalsForLayer(sb, center, layer);
             // Dynamic entities for this layer (NPCs / mobs / drops / chars) draw above the layer's tiles+objs
             // and below the next layer's, mirroring the v95 client's CMapleStage::Draw loop. Skipped when the
             // caller didn't pass a callback (e.g. FieldStage's pre-game preview has no entities yet).
@@ -404,12 +443,6 @@ public sealed class FieldScene
         }
 
         foreach (var b in _fronts) DrawBackground(sb, b, center, screenWidth, screenHeight);
-
-        // Visible portals (type 2): the animated swirl, anchored by the pv canvas origin to the portal point.
-        if (_portalPv is not null)
-            foreach (var (_, portal) in _portals)
-                if (portal.Type == 2)
-                    _portalPv.Draw(sb, WorldToScreen(portal.X, portal.Y, center));
 
         // Debug foothold overlay (MAPLECLAUDE_DEBUG): floors green, walls red; blue channel encodes the WZ
         // layer (page) so it can be cross-checked against a WZ editor's per-layer views.
@@ -429,6 +462,75 @@ public sealed class FieldScene
     // Matches GameCamera.WorldToScreen so the map aligns with mobs/drops/player.
     private Vector2 WorldToScreen(float worldX, float worldY, Vector2 center) =>
         new(worldX - Camera.Position.X + center.X, worldY - Camera.Position.Y + center.Y);
+
+    private void DrawPortalsForLayer(SpriteBatch sb, Vector2 center, int layer)
+    {
+        foreach (var (_, portal) in _portals)
+        {
+            if (LayerAt(portal.X, portal.Y) != layer)
+            {
+                continue;
+            }
+
+            var anim = PortalAnimationForType(portal);
+            if (anim is null)
+            {
+                continue;
+            }
+
+            anim.Draw(sb, WorldToScreen(portal.X, portal.Y, center));
+        }
+    }
+
+    private AnimatedSprite? PortalAnimationForType(Portal portal)
+    {
+        if (portal.Type is VisiblePortalType or ChangeablePortalType or ScriptPortalType)
+        {
+            return _portalPv;
+        }
+
+        if (_activeHiddenPortalIndex != portal.Index)
+        {
+            return null;
+        }
+
+        var image = HiddenPortalImage(portal);
+        return portal.Type switch
+        {
+            HiddenPortalType => _portalPh.GetValueOrDefault(image),
+            ScriptHiddenPortalType => _portalPsh.GetValueOrDefault(image),
+            _ => null,
+        };
+    }
+
+    private void UpdateHiddenPortal(Vector2? playerPosition)
+    {
+        _activeHiddenPortalIndex = null;
+        if (playerPosition is not { } pos)
+        {
+            return;
+        }
+
+        foreach (var (_, portal) in _portals.OrderByDescending(kv => kv.Key))
+        {
+            if (portal.Type is not (HiddenPortalType or ScriptHiddenPortalType))
+            {
+                continue;
+            }
+
+            if (pos.X >= portal.X - HiddenPortalXRange
+                && pos.X <= portal.X + HiddenPortalXRange
+                && pos.Y >= portal.Y - HiddenPortalYRange
+                && pos.Y <= portal.Y + HiddenPortalYRange)
+            {
+                _activeHiddenPortalIndex = portal.Index;
+                return;
+            }
+        }
+    }
+
+    private static string HiddenPortalImage(Portal portal) =>
+        string.IsNullOrWhiteSpace(portal.Image) ? DefaultHiddenPortalImage : portal.Image;
 
     // Debug helper: draw a thin line from a to b by stretching+rotating the 1×1 white pixel.
     private static void DrawDebugLine(SpriteBatch sb, Texture2D white, Vector2 a, Vector2 b, Color c, float thickness)
