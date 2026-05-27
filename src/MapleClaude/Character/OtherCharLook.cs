@@ -22,6 +22,12 @@ public sealed class OtherCharLook
     public AvatarLook? Look   { get; }
 
     public Vector2   Position { get; set; }
+
+    /// <summary>Render layer (0..7), the WZ layer of the foothold this remote player is standing on. Updated
+    /// by the UserMove handler from the foothold id the server forwards. Defaults to 7 (always-visible top)
+    /// before the first move packet lands.</summary>
+    public int       Layer    { get; set; } = 7;
+
     private bool     _facingLeft;
 
     private CharLook? _sprites;
@@ -57,6 +63,21 @@ public sealed class OtherCharLook
     public void SetPosition(short x, short y) => Position = new Vector2(x, y);
 
     public void SetFacing(bool facingLeft) => _facingLeft = facingLeft;
+
+    /// <summary>Forward an emotion start (or revert) to the inner <see cref="CharLook"/>.
+    /// Used by the field handler when this player triggers / reverts a face emotion.</summary>
+    public void SetEmotion(int emotion, int durationMs) => _sprites?.SetEmotion(emotion, durationMs);
+
+    /// <summary>Current emotion id on this remote avatar (0 = default).</summary>
+    public int EmotionId => _sprites?.EmotionId ?? 0;
+
+    /// <summary>Screen-space click box covering the avatar body + the name/level tag above it.
+    /// <paramref name="screenPos"/> is the foot point (the same value passed to <see cref="Draw"/>).
+    /// Used by <c>GameStage</c> to hit-test a double-click for the character-profile request.</summary>
+    public Rectangle GetScreenBounds(Vector2 screenPos) =>
+        new((int)(screenPos.X - PlaceholderW / 2f),
+            (int)(screenPos.Y - PlaceholderH - 34),
+            PlaceholderW, PlaceholderH + 34);
 
     public void Update(float dt)
     {

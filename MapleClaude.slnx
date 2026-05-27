@@ -8,11 +8,13 @@
     <Project Path="src/MapleClaude/MapleClaude.csproj" />
   </Folder>
   <Folder Name="/tests/">
+    <Project Path="tests/MapleClaude.Domain.Tests/MapleClaude.Domain.Tests.csproj" />
     <Project Path="tests/MapleClaude.Net.Tests/MapleClaude.Net.Tests.csproj" />
     <Project Path="tests/MapleClaude.Wz.Tests/MapleClaude.Wz.Tests.csproj" />
   </Folder>
   <Folder Name="/tools/">
     <Project Path="tools/gen-opcodes/gen-opcodes.csproj" />
+    <Project Path="tools/wz-dump/wz-dump.csproj" />
     <Project Path="tools/wz-ui-dump/wz-ui-dump.csproj" />
   </Folder>
 </Solution>

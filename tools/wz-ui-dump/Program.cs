@@ -1,3 +1,6 @@
+using System.Buffers.Binary;
+using System.IO.Compression;
+using System.Text;
 using MapleClaude.Wz;
 
 // wz-ui-dump — prints a WZ node subtree with each canvas's dimensions and
@@ -30,6 +33,7 @@ var wzArg = args[0];
 var nodePath = args[1];
 var maxDepth = 6;
 var canvasOnly = false;
+string? pngPath = null;
 
 for (var i = 2; i < args.Length; i++)
 {
@@ -41,6 +45,10 @@ for (var i = 2; i < args.Length; i++)
             break;
         case "--canvas-only":
             canvasOnly = true;
+            break;
+        case "--png" when i + 1 < args.Length:
+            pngPath = args[i + 1];
+            i++;
             break;
         default:
             Console.Error.WriteLine($"unknown argument: {args[i]}");
@@ -65,9 +73,97 @@ if (root is null)
     return 1;
 }
 
+if (pngPath is not null)
+{
+    var canvas = root as WzCanvas
+        ?? (root as WzProperty)?.Get("0") as WzCanvas
+        ?? ((root as WzProperty)?.Get("0") as WzProperty)?.Get("0") as WzCanvas;
+    if (canvas is null)
+    {
+        Console.Error.WriteLine($"node '{nodePath}' is not a canvas (and has no /0 canvas child)");
+        return 1;
+    }
+    return ExportPng(canvas, pngPath);
+}
+
 Console.WriteLine($"# {Path.GetFileName(wzPath)} :: {nodePath}");
 Dump(LeafName(nodePath), root, 0);
 return 0;
+
+static int ExportPng(WzCanvas canvas, string path)
+{
+    ReadOnlySpan<byte> rgba;
+    try
+    {
+        rgba = canvas.DecodeBgra(); // byte order R,G,B,A per WzCanvas.DecodeBgra
+    }
+    catch (Exception ex)
+    {
+        Console.Error.WriteLine($"decode failed ({canvas.Width}x{canvas.Height}, format {canvas.Format}): {ex.Message}");
+        return 1;
+    }
+    WritePng(path, canvas.Width, canvas.Height, rgba);
+    Console.WriteLine($"wrote {path} ({canvas.Width}x{canvas.Height}, format {canvas.Format})");
+    return 0;
+}
+
+static void WritePng(string path, int w, int h, ReadOnlySpan<byte> rgba)
+{
+    using var fs = File.Create(path);
+    fs.Write([137, 80, 78, 71, 13, 10, 26, 10]); // PNG signature
+
+    var ihdr = new byte[13];
+    BinaryPrimitives.WriteInt32BigEndian(ihdr.AsSpan(0), w);
+    BinaryPrimitives.WriteInt32BigEndian(ihdr.AsSpan(4), h);
+    ihdr[8] = 8;  // bit depth
+    ihdr[9] = 6;  // colour type: RGBA
+    WriteChunk(fs, "IHDR", ihdr);
+
+    // Filter-byte 0 per scanline, RGBA rows (DecodeBgra already gives R,G,B,A).
+    var raw = new byte[h * (1 + w * 4)];
+    for (var y = 0; y < h; y++)
+    {
+        var ro = y * (1 + w * 4);
+        raw[ro] = 0;
+        rgba.Slice(y * w * 4, w * 4).CopyTo(raw.AsSpan(ro + 1));
+    }
+    using var ms = new MemoryStream();
+    using (var z = new ZLibStream(ms, CompressionLevel.Optimal, leaveOpen: true))
+    {
+        z.Write(raw);
+    }
+    WriteChunk(fs, "IDAT", ms.ToArray());
+    WriteChunk(fs, "IEND", []);
+}
+
+static void WriteChunk(Stream s, string type, byte[] data)
+{
+    Span<byte> len = stackalloc byte[4];
+    BinaryPrimitives.WriteInt32BigEndian(len, data.Length);
+    s.Write(len);
+    var typeBytes = Encoding.ASCII.GetBytes(type);
+    s.Write(typeBytes);
+    s.Write(data);
+    var crc = 0xFFFFFFFFu;
+    crc = Crc32(crc, typeBytes);
+    crc = Crc32(crc, data);
+    Span<byte> crcb = stackalloc byte[4];
+    BinaryPrimitives.WriteUInt32BigEndian(crcb, crc ^ 0xFFFFFFFFu);
+    s.Write(crcb);
+}
+
+static uint Crc32(uint crc, byte[] d)
+{
+    foreach (var b in d)
+    {
+        crc ^= b;
+        for (var i = 0; i < 8; i++)
+        {
+            crc = (crc & 1) != 0 ? (crc >> 1) ^ 0xEDB88320u : crc >> 1;
+        }
+    }
+    return crc;
+}
 
 static string LeafName(string path)
 {

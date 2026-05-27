@@ -24,7 +24,7 @@ MapleClaude is a brand-new client written in C# 13 / .NET 10 with MonoGame for r
 | 11 | StringPool: bundled English language pack (`MapleClaude.Localization`), `Game.StringPool` lookup/format service, job names + loot warnings sourced from the pack | shipped |
 | 12 | Display names (String.wz): item/skill/map/mob/npc names + descriptions via a cached `NameService`; wired into inventory, skill book, loot popups, name tags | planned |
 | 13 | Map rendering completeness: tile layers 0–7, object layers 1–7 with cross-layer z-order, multi-frame back/obj animation, parallax (`rx`/`ry`, `HMove`/`VMove`); ladders/ropes, reactors, weather | planned |
-| 14 | Character/avatar fidelity: real Character.wz zmap/vslot z-order, full animation state machine (walk/jump/attack/sit/prone/climb) for self + others, hair/pet/weapon-sticker/cash overlays, CharSelect avatar, consolidate the two char-create stages | planned |
+| 14 | Character/avatar fidelity + login polish: CharSelect renders real avatars (walk1/walk2), consolidated char-create (per-race name screens + forbidden-name check), secondary-password (PIC) register/verify via the v95 soft keyboard, channel grey-out for inactive channels, logout-on-back | shipped |
 | 15 | Skills & buffs depth: Skill.wz icons/max-level/active-passive/MP cost, cooldown timers + UI, per-skill cast animation/effect, full `TemporaryStatSet(31)` buff decode | planned |
 | 16 | Keybinds & quickslots: bind skills/items to keys (`KeyAction` for skill/item/macro), working quickslot bar, drag-to-bind from SkillBook/Inventory, duplicate-binding warning | planned |
 | 17 | In-game presentation: switch to the in-game resolution on map entry (restore on logout), mature the `StatusBar`/HUD to real v95 layout + assets, reflow all panels to the active resolution | planned |
@@ -32,8 +32,17 @@ MapleClaude is a brand-new client written in C# 13 / .NET 10 with MonoGame for r
 | 19 | NPC shops & storage: `OpenShopDlg`/`ShopResult`/`UserShopRequest` buy/sell, the `Shop` panel, and storage/trunk (`TrunkResult`/`TrunkRequest`) | planned |
 | 20 | Quests: quest start/complete (`UserQuestRequest`), `QuestRecord` from `CharacterData` + live updates, the `QuestLog` driven by real data, quest NPC/markers | planned |
 | 21 | Guild, messenger & combat depth: `GuildResult`/`GuildRequest` + guild tab, the messenger window; outbound `MobMove(227)` for controlled mobs and a server-accurate damage formula | planned |
+| 22 | UI-origin tooling + login screens: `tools/wz-ui-dump` (WZ canvas size/origin dumper, `--png` export); world-select + character-select relaid out to authentic map-native v95 coordinates verified against the IDB | shipped |
+| 23 | In-game HUD authenticity: `StatusBar` rebuilt 1:1 from `StatusBar2.img` (`CUIStatusBar`), `MiniMap` rewritten to the v95 `(world+center)>>mag` transform, `KeyConfig` rebuilt from `UIWindow2.img/KeyConfig` (`CalcKeyIconPosInfo` port) + `QuickSlotConfig` | in progress |
+| 24 | Authentic in-game windows: repoint Item/Equip/Stat/UserInfo/Skill/Quest/options/channel-select/community/messenger/chat from the empty `UIWindow.img` to `UIWindow2.img`, origin-baked layout at IDB coordinates, shared `UIWindowFrame`; reuses existing data-binding (incl. the wired `UserTransferChannelRequest`) | planned |
+| 25 | Family system: the `Family` (precept / junior / reputation-buff) and `FamilyTree` (senior-junior tree) windows, authentic from `UIWindow2.img`; server wiring where Kinoko supports it, else an authentic shell | planned |
+| 26 | Notes, rankings & collections: `Memo` (note send/inbox), `Ranking`, `MonsterBook` (card collection), `BattleRecord`, `Title`/medal, and the paged `Book` reader | planned |
+| 27 | Player trading & shops: the MiniRoom family — `TradingRoom` (player trade), `PersonalShop`, `EntrustedShop` (hired merchant) — authentic UI + the MiniRoom request/result protocol | planned |
+| 28 | Maker, macros & item-utility dialogs: `Maker` (item maker), the skill-`Macro` wizard, `Reset` (AP/SP), `Delivery` (cash gift box), `Claim`, `EnchantSkill`, and the cash item dialogs (cube/hammer/scissors/protector/repair) | planned |
+| 29 | Map `info` metadata: parse the full `...img/info` block into `MapInfo` (`version`, `cloud`, `town`, `mobRate`, `bgm`, `returnMap`, `mapDesc`, `hideMinimap`, `forcedReturn`, `moveLimit`, `mapMark`, `swim`, `fieldLimit`, `VR*`, `fly`, `noMapCmd`, `onFirstUserEnter`, `onUserEnter`) and wire the client behaviors (hide-minimap, map mark, swim/fly physics, cloud fall-return, field/move limits) | planned |
+| 30 | Portal rendering: draw the animated in-game portals (`MapHelper.img/portal/game/{pv,ph,psh}`) at each parsed portal by type (`pt`), reusing the existing animation loader; warp logic (Phase 10) unchanged | planned |
 
-The cosmetic UI panels added in Phase 3.5 (StatusBar gauges, MiniMap, ItemInventory grid, SkillBook tabs, etc.) currently render with placeholder/demo data; Phases 4–10 progressively wire each one to live server packets without redrawing them.
+Phases 22–28 form the **authentic-UI rebuild track**: each in-game screen is relaid out 1:1 from the standard `UIWindow2.img` canvases (origins) cross-referenced with the decompiled v95 client, replacing the hand-authored placeholder layouts. Earlier cosmetic panels (Phase 3.5) and their Phase 4–10 server wiring are reused unchanged; these phases only redraw them authentically. Windows for features upstream Kinoko does not implement (alliance, expedition, family, player shops, makers, cash dialogs) ship as fully-laid-out **shells** until their protocol lands.
 
 See `docs/roadmap.md` for the detailed roadmap and `CLAUDE.md` for the contributor / Claude-Code guide.
 
@@ -62,9 +71,11 @@ See `docs/roadmap.md` for the detailed roadmap and `CLAUDE.md` for the contribut
 | `CheckPassword(1)` / `CheckPasswordResult(0)` | C↔S | `src/MapleClaude/Stages/LoginStage.cs`, `src/MapleClaude.Net/Handlers/LoginHandlers.cs` |
 | `WorldInfoRequest(4)` / `WorldInformation(10)` | C↔S | `src/MapleClaude/Stages/WorldSelectStage.cs` |
 | `SelectWorld(5)` / `SelectWorldResult(11)` | C↔S | `src/MapleClaude/Stages/WorldSelectStage.cs` |
-| `CheckDuplicatedID(21)` / `CheckDuplicatedIDResult(13)` | C↔S | `src/MapleClaude/Stages/CharCreateStage.cs` |
-| `CreateNewCharacter(22)` / `CreateNewCharacterResult(14)` | C↔S | `src/MapleClaude/Stages/CharCreateStage.cs` |
+| `CheckDuplicatedID(21)` / `CheckDuplicatedIDResult(13)` | C↔S | `src/MapleClaude/Stages/CharCreationStage.cs` |
+| `CreateNewCharacter(22)` / `CreateNewCharacterResult(14)` | C↔S | `src/MapleClaude/Stages/CharCreationStage.cs` |
 | `SelectCharacter(19)` / `SelectCharacterResult(12)` | C↔S | `src/MapleClaude/Stages/CharSelectStage.cs` |
+| `EnableSPWRequest(28)` / `CheckSPWRequest(29)` / `CheckSPWResult(27)` (secondary password / PIC) | C↔S | `src/MapleClaude/Stages/CharSelectStage.cs` + `src/MapleClaude.Net/Handlers/LoginHandlers.cs` |
+| `LogoutWorld(12)` | C→S | `src/MapleClaude/Stages/CharSelectStage.cs` + `src/MapleClaude.Net/Senders/LoginSender.cs` |
 | `MigrateIn(20)` | C→S | `src/MapleClaude.Net/Session/MigrationCoordinator.cs` |
 | `SetField(141)` | S→C | `src/MapleClaude.Net/Handlers/FieldHandlers.cs` |
 | `UserMove(44)` | C→S | `src/MapleClaude/Stages/FieldStage.cs` + `src/MapleClaude.Net/Packet/MovePathEncoder.cs` |
@@ -153,6 +164,14 @@ dotnet run --project src/MapleClaude
 Open `MapleClaude.slnx` in Visual Studio 2026 for the IDE experience (Debug → Start with F5).
 
 If the title screen loads, your WZ assets are wired correctly. If you can log in and reach the world / character select, the cipher pipeline is working. The Phase 1 finish line is logging `MigrateIn ACK observed — Phase 2 boundary reached` after picking a character — that means the channel handoff worked.
+
+### 6b. Hot-reload dev loop
+
+```powershell
+.\watch.ps1
+```
+
+Runs the client under `dotnet watch run`. Save a C# edit and **method-body changes** (Draw / Update / layout logic) apply to the running game via .NET Hot Reload; **structural changes** (new fields, signatures, types) auto-rebuild and relaunch. No manual close → build → deploy → reopen. The script reads the WZ folder from `MAPLECLAUDE_WZ_DIR` or `.deploy.local` and sets `MAPLECLAUDE_DEBUG=1` so the live layout overlay (§9) is available for dragging positions with zero rebuild.
 
 ### 7. Single `.exe` is the default build output
 

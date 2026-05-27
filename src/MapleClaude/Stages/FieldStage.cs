@@ -70,7 +70,7 @@ public sealed class FieldStage : Stage
         _loader = new WzTextureLoader(GraphicsDevice);
         _avatar = new CharacterRenderer(
             _loggerFactory.CreateLogger<CharacterRenderer>(),
-            game.CharacterWz, game.ItemWz, _loader);
+            game.CharacterWz, game.ItemWz, game.BaseWz, _loader);
 
         // KeyConfig — UI panel that also owns the binding map.
         // Loaded without WZ buttons (null ui pkg) so it falls back to drawn keys.
@@ -130,7 +130,9 @@ public sealed class FieldStage : Stage
 
         // F12 = meta key to open KeyConfig regardless of bindings
         if (kb.IsKeyDown(Keys.F12) && !_prevKeyboard.IsKeyDown(Keys.F12))
-            kc.IsVisible = !kc.IsVisible;
+        {
+            if (kc.IsVisible) kc.IsVisible = false; else kc.Open();
+        }
 
         // All movement driven by KeyConfig bindings — respects user rebinds
         var input = new PlayerInput
@@ -203,8 +205,9 @@ public sealed class FieldStage : Stage
         p.WriteByte(_fieldKey);
         p.WriteInt(0);
         p.WriteInt(0);
-        p.WriteInt(0);
-        p.WriteInt(0);
+        p.WriteInt(_field?.Crc ?? 0);   // dwCrc — must match field.getFieldCrc() or the server logs a CRC mismatch
+        p.WriteInt(0);                  // 0
+        p.WriteInt(0);                  // Crc32 (server reads it but does not validate)
         p.WriteBytes(movePathBlob);
         Game.Session.Send(p);
     }

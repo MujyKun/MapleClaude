@@ -1,3 +1,4 @@
+using MapleClaude.Character;
 using MapleClaude.Render;
 using MapleClaude.UI;
 using MapleClaude.Wz;
@@ -9,174 +10,374 @@ using System.Linq;
 namespace MapleClaude.UI.Game;
 
 /// <summary>
-/// Item inventory panel. Toggle with I.
-/// 5 tabs: Equip | Use | Setup | Etc | Cash
-/// Each tab: 4-column grid of item slots (4×6 visible, scrollable).
-/// Items wired from server inventory packets — placeholder test items pre-seeded.
-/// WZ: UIWindow.img/Item/
+/// Item inventory window. Toggle with I.
+/// Rebuilt against the authentic v95 <c>UIWindow2.img/Item</c> node: a layered
+/// background (<c>backgrnd</c>/<c>backgrnd2</c>/<c>backgrnd3</c>), a 5-tab strip
+/// (Equip | Use | Setup | Etc | Cash) whose buttons sit at the WZ-baked origins,
+/// and a slot grid that shows 4×6 (24) slots in small mode and expands to 16×6
+/// (96, four side-by-side pages) in full mode via the BtFull / BtSmall toggle.
+/// Slots render real item icons resolved through <see cref="ItemIconLoader"/>.
+///
+/// WZ origin convention: a sub-sprite's origin already encodes its window-relative
+/// position, so every background layer and Bt* button is drawn at the window's
+/// top-left and the origin places it. Slot cells are baked into the background,
+/// so only icons / highlights / counts are overlaid; the grid's first-cell origin
+/// (<see cref="SlotBase"/>) is the one value WZ doesn't carry — tunable live.
 /// </summary>
 public sealed class ItemInventory : GamePanel
 {
-    // ── Item data ──────────────────────────────────────────────────────────────
+    // ── Public item record (kept stable for GameStage / Shop wiring) ─────────────
     public sealed class InvItem
     {
         public int    Id;
         public string Name     = string.Empty;
         public int    Quantity = 1;
         public int    Tab;        // 0=Equip 1=Use 2=Setup 3=Etc 4=Cash
-        public int    Slot;       // 1-based inventory slot position
+        public int    Slot;       // 1-based inventory position
+        public int    Grade;      // 0=none, 1..5 = potential rank (Quality dot)
+
+        // Cached icon sprite (resolved lazily from the icon service).
+        internal WzSprite? Icon;
+        internal bool      IconResolved;
     }
 
-    // ── Layout ─────────────────────────────────────────────────────────────────
-    private const int Cols    = 4;
-    private const int Rows    = 6;
-    private const int SlotW   = 36;
-    private const int SlotH   = 36;
-    private const int GapX    = 2;
-    private const int GapY    = 2;
-    private const int PanelW  = Cols * (SlotW + GapX) + 16;
-    private const int PanelH  = Rows * (SlotH + GapY) + 74;
-    private const int GridX   = 8;
-    private const int GridY   = 46;
+    // ── Grid geometry (from CUIItem::GetItemSlotRect in the v95 client) ──────────
+    // SetRect(36*col+10, 35*row+51, 36*col+42, 35*row+83): base (10,51), 32×32
+    // cell box, column pitch 36, row pitch 35. Full mode wraps every 6 rows into
+    // a new 4-column page (page = row/6).
+    private const int CellW   = 36;   // column pitch
+    private const int CellH   = 35;   // row pitch
+    private const int IconBox = 32;   // visible slot box (icon + hit area)
+    private const int SmallCols = 4;
+    private const int Rows      = 6;  // visible rows in both modes
+    private const int FullCols  = 16; // 4 horizontal pages × 4 cols
+    private const int PageSlots = SmallCols * Rows;   // 24 slots per page
+
+    // First-slot top-left relative to the window (CUIItem hardcodes (10,51)).
+    // Exposed for the MAPLECLAUDE_DEBUG drag overlay (registered by GameStage).
+    public Vector2 SlotBase = new(10, 51);
+
+    private const int TabX0     = 9;    // Tab/enabled/0 origin → window+(9,26)
+    private const int TabStride = 31;
+    private const int TabY      = 26;
+    private const int TabW      = 31;
+    private const int TabH      = 22;
+    private const int BottomY   = 267;  // BtCoin / action-button row
+    private const int ScrollX   = 152;  // CCtrlScrollBar x (small mode)
+    private const int MesoRight = 126;  // meso text right edge (CUIItem::Draw)
+    private const int MesoY     = 268;  // meso text baseline y
 
     private static readonly string[] TabNames = ["Equip", "Use", "Setup", "Etc", "Cash"];
-    private static readonly Color[] TabColors =
-    [
-        new Color(90, 130, 90),
-        new Color(90, 90, 160),
-        new Color(130, 110, 70),
-        new Color(100, 100, 100),
-        new Color(150, 80, 150),
-    ];
 
-    // ── UI ─────────────────────────────────────────────────────────────────────
-    private readonly WzSprite? _background;
-    private readonly WzSprite? _slotBg;
-    private readonly Button?   _btClose;
-    private readonly Button?[] _tabBtns = new Button?[5];
-    private readonly List<Button> _allButtons = new();
+    // ── WZ assets ────────────────────────────────────────────────────────────────
+    private readonly WzSprite?[] _bgSmall = new WzSprite?[3];
+    private readonly WzSprite?[] _bgFull  = new WzSprite?[3];
+    private readonly WzSprite?   _activeIcon;
+    private readonly WzSprite?[] _tabEnabled  = new WzSprite?[5];
+    private readonly WzSprite?[] _tabDisabled = new WzSprite?[5];
+    private readonly WzSprite?[] _quality     = new WzSprite?[6];
 
-    // ── State ──────────────────────────────────────────────────────────────────
-    private int _activeTab;
-    private readonly int[] _scrollOffset = new int[5];
-    private readonly List<InvItem> _items = new();
-    private InvItem? _hoverItem;
-    private bool _dragging;
-    private Vector2 _dragOff;
+    private readonly Button? _btCoin;
+    private readonly Button? _btGather;
+    private readonly Button? _btSort;
+    private readonly Button? _btFull;
+    private readonly Button? _btSmall;
+    private readonly Button? _btCashshop;
+    private readonly Button? _btClose;
 
+    private readonly WzTextureLoader _loader;
+    private readonly ItemIconLoader? _icons;
     private readonly BuiltInFont? _font;
 
-    public ItemInventory(WzTextureLoader loader, WzPackage? ui, BuiltInFont? font)
+    // ── State ────────────────────────────────────────────────────────────────────
+    private int  _activeTab;
+    private bool _fullMode;
+    private bool _showSort;   // arrange button state: false → gather icon, true → sort icon
+    private long _meso;
+    private readonly int[] _scrollRow = new int[5];   // top visible row, per tab
+    private readonly SortedDictionary<short, InvItem>[] _tabs =
+    [
+        new(), new(), new(), new(), new(),
+    ];
+
+    private InvItem? _hoverItem;
+    private int _hoverPos = -1;
+    private bool _dragging;
+    private Vector2 _dragOff;
+    private int _prevWheel;
+    private int _viewW = 800, _viewH = 600;
+
+    // ── Item tooltip + ghost drag ────────────────────────────────────────────────
+    private readonly ItemTooltip? _tooltip;
+    private bool _dragActive;            // an item icon is "picked up" onto the cursor
+    private InvItem? _dragItem;
+    private int _dragFromSlot = -1;
+    private int _dragFromTab;
+    private int _mouseX, _mouseY;
+
+    public ItemInventory(WzTextureLoader loader, WzPackage? ui, BuiltInFont? font,
+        ItemIconLoader? icons = null, Func<int, string?>? itemDesc = null, BuiltInFont? tipFont = null,
+        BuiltInFont? tipTabFont = null)
     {
-        _font = font;
+        _loader = loader;
+        _font   = font;
+        _icons  = icons;
         IsVisible = false;
         Position = new Vector2(370, 50);
 
-        var item = ui?.GetItem("UIWindow.img/Item") as WzProperty;
-        _background = item?.Get("backgrnd") is WzCanvas bc ? loader.Load(bc) : null;
-        _slotBg     = item?.Get("slot")     is WzCanvas sc ? loader.Load(sc) : null;
+        var item = ui?.GetItem("UIWindow2.img/Item") as WzProperty
+                   ?? ui?.GetItem("UIWindow.img/Item") as WzProperty;
 
-        var closeRoot = item?.Get("BtClose") as WzProperty;
-        if (closeRoot != null)
-        {
-            _btClose = new Button(loader, closeRoot) { OnClick = () => IsVisible = false };
-            _allButtons.Add(_btClose);
-        }
+        _bgSmall[0] = LoadCanvas(item, "backgrnd");
+        _bgSmall[1] = LoadCanvas(item, "backgrnd2");
+        _bgSmall[2] = LoadCanvas(item, "backgrnd3");
+        _bgFull[0]  = LoadCanvas(item, "FullBackgrnd");
+        _bgFull[1]  = LoadCanvas(item, "FullBackgrnd2");
+        _bgFull[2]  = LoadCanvas(item, "FullBackgrnd3");
+        _activeIcon = LoadCanvas(item, "activeIcon");
 
-        var tabEnabled = (item?.Get("Tab") as WzProperty)?.Get("enabled") as WzProperty;
+        var tab = item?.Get("Tab") as WzProperty;
+        var tabEnabled  = tab?.Get("enabled")  as WzProperty;
+        var tabDisabled = tab?.Get("disabled") as WzProperty;
         for (var i = 0; i < 5; i++)
         {
-            var idx = i;
-            var tabRoot = tabEnabled?.Get($"{i}") as WzProperty;
-            if (tabRoot != null)
-            {
-                _tabBtns[i] = new Button(loader, tabRoot)
-                    { OnClick = () => { _activeTab = idx; } };
-                _allButtons.Add(_tabBtns[i]!);
-            }
+            _tabEnabled[i]  = LoadCanvas(tabEnabled,  i.ToString());
+            _tabDisabled[i] = LoadCanvas(tabDisabled, i.ToString());
         }
 
-        SeedPlaceholder();
+        var quality = item?.Get("Quality") as WzProperty;
+        for (var g = 0; g < 6; g++)
+            _quality[g] = LoadCanvas(quality?.Get(g.ToString()) as WzProperty, "0");
+
+        // BtGather and BtSort are the two states of one "arrange" button
+        // (CUIItem::SetArrangeButton swaps the asset by sort state), so they share
+        // the same origin (129,267); clicking toggles which is shown. The actual
+        // gather/sort request to the server is a future wire-up.
+        _btCoin     = MakeButton(item, "BtCoin");
+        _btGather   = MakeButton(item, "BtGather", () => _showSort = true);
+        _btSort     = MakeButton(item, "BtSort",   () => _showSort = false);
+        _btFull     = MakeButton(item, "BtFull",  () => SetFullMode(true));
+        _btSmall    = MakeButton(item, "BtSmall", () => SetFullMode(false));
+        _btCashshop = MakeButton(item, "BtCashshop");
+
+        // CUIItem has no own BtClose node — the close X is added by the shared CUIWnd
+        // frame (Basic.img/BtClose3), exactly like CUIEquip. Anchor it top-right.
+        if (ui?.GetItem("Basic.img/BtClose3") is WzProperty closeRoot)
+            _btClose = new Button(_loader, closeRoot) { OnClick = () => IsVisible = false };
+
+        if (font != null && icons != null)
+        {
+            var tipAssets = new TooltipAssets(loader, ui);
+            _tooltip = new ItemTooltip(tipFont ?? font, icons, tipAssets, itemDesc, tipTabFont);
+        }
+
         LayoutButtons();
     }
 
-    // ── Public API ─────────────────────────────────────────────────────────────
+    /// <summary>Push the player's requirement stats to the tooltip so unmet reqs flag red.</summary>
+    public void SetPlayerStats(int level, int str, int dex, int intt, int luk, int jobId) =>
+        _tooltip?.SetPlayer(level, str, dex, intt, luk, jobId);
 
-    public void AddItem(InvItem item) => _items.Add(item);
-    public void RemoveItem(int id) => _items.RemoveAll(i => i.Id == id);
-    public void Clear() => _items.Clear();
+    // ── Public API (preserved for GameStage / Shop) ──────────────────────────────
 
-    /// <summary>Remove all server-driven items (used before loading a fresh inventory).</summary>
-    public void ClearAll() => _items.Clear();
+    public int ActiveTab => _activeTab;
+    public long Meso { set => _meso = value; }
+
+    public void AddItem(InvItem item)
+    {
+        if ((uint)item.Tab < 5) _tabs[item.Tab][(short)item.Slot] = item;
+    }
+
+    public void RemoveItem(int id)
+    {
+        foreach (var t in _tabs)
+            foreach (var key in t.Where(kv => kv.Value.Id == id).Select(kv => kv.Key).ToList())
+                t.Remove(key);
+    }
+
+    public void Clear()    { foreach (var t in _tabs) t.Clear(); }
+    public void ClearAll() => Clear();
 
     /// <summary>Insert or replace the item occupying (tab, slot).</summary>
     public void SetSlot(int tab, int slot, InvItem item)
     {
+        if ((uint)tab >= 5) return;
         item.Tab = tab;
         item.Slot = slot;
-        _items.RemoveAll(i => i.Tab == tab && i.Slot == slot);
-        _items.Add(item);
+        _tabs[tab][(short)slot] = item;
     }
 
-    public void RemoveSlot(int tab, int slot) =>
-        _items.RemoveAll(i => i.Tab == tab && i.Slot == slot);
+    public void RemoveSlot(int tab, int slot)
+    {
+        if ((uint)tab < 5) _tabs[tab].Remove((short)slot);
+    }
 
     public void SetSlotQuantity(int tab, int slot, int qty)
     {
-        var it = _items.FirstOrDefault(i => i.Tab == tab && i.Slot == slot);
-        if (it != null)
-        {
-            it.Quantity = qty;
-        }
+        if ((uint)tab < 5 && _tabs[tab].TryGetValue((short)slot, out var it)) it.Quantity = qty;
     }
 
     /// <summary>Move the item at (tab, fromSlot) to toSlot (0 = removed/dropped).</summary>
     public void MoveSlot(int tab, int fromSlot, int toSlot)
     {
-        var it = _items.FirstOrDefault(i => i.Tab == tab && i.Slot == fromSlot);
-        if (it == null)
-        {
-            return;
-        }
-        if (toSlot == 0)
-        {
-            _items.Remove(it);
-            return;
-        }
-        _items.RemoveAll(i => i.Tab == tab && i.Slot == toSlot);
+        if ((uint)tab >= 5 || !_tabs[tab].TryGetValue((short)fromSlot, out var it)) return;
+        _tabs[tab].Remove((short)fromSlot);
+        if (toSlot == 0) return;          // dropped out of this tab
         it.Slot = toSlot;
+        _tabs[tab][(short)toSlot] = it;
     }
 
-    /// <summary>Find the item at (tab, slot), or null.</summary>
     public InvItem? ItemAt(int tab, int slot) =>
-        _items.FirstOrDefault(i => i.Tab == tab && i.Slot == slot);
+        (uint)tab < 5 && _tabs[tab].TryGetValue((short)slot, out var it) ? it : null;
+
+    /// <summary>Lowest 1-based slot in a tab not currently occupied (1..max), or -1 if full.
+    /// Used to auto-place an item unequipped back into the Equip tab.</summary>
+    public int FirstFreeSlot(int tab, int max = 96)
+    {
+        if ((uint)tab >= 5) return -1;
+        var t = _tabs[tab];
+        for (var s = 1; s <= max; s++)
+            if (!t.ContainsKey((short)s)) return s;
+        return -1;
+    }
 
     /// <summary>All inventory items (for the shop sell list).</summary>
-    public IReadOnlyList<InvItem> AllItems => _items;
+    public IReadOnlyList<InvItem> AllItems => _tabs.SelectMany(t => t.Values).ToList();
 
-    /// <summary>Slot (inventory position) of a consumable in the Use tab, or -1.
-    /// Used to fire a key-bound item.</summary>
+    /// <summary>Inventory position of a consumable in the Use tab, or -1.</summary>
     public int FindUseSlot(int itemId)
     {
-        var it = _items.FirstOrDefault(i => i.Tab == 1 && i.Id == itemId);
-        return it?.Slot ?? -1;
+        foreach (var kv in _tabs[1])
+            if (kv.Value.Id == itemId) return kv.Key;
+        return -1;
     }
 
-    public int ActiveTab => _activeTab;
+    /// <summary>Raised on a double-click of an occupied slot: (tab, slot, itemId).</summary>
+    public Action<int, int, int>? OnItemActivate { get; set; }
 
-    // ── Update ─────────────────────────────────────────────────────────────────
+    /// <summary>Raised when an item is dragged to a different slot in the same tab: (tab, from, to).</summary>
+    public Action<int, int, int>? OnMoveItem { get; set; }
+
+    /// <summary>Raised when a held item is dropped outside the window — drop it to the ground: (tab, slot).</summary>
+    public Action<int, int>? OnDropToGround { get; set; }
+
+    /// <summary>Drop the currently-held item to the ground (called by GameStage when the drop lands
+    /// outside the window). The item stays until the server confirms removal via InventoryOperation.</summary>
+    public void DropHeldToGround()
+    {
+        if (!_dragActive) return;
+        OnDropToGround?.Invoke(_dragFromTab, _dragFromSlot);
+        CancelDrag();
+    }
+
+    // ── Layout ───────────────────────────────────────────────────────────────────
+
+    private int PanelW => _fullMode ? (_bgFull[0]?.Width ?? 594) : (_bgSmall[0]?.Width ?? 172);
+    private int PanelH => _bgSmall[0]?.Height ?? 293;
+    private int Cols   => _fullMode ? FullCols : SmallCols;
+
+    public override void Relayout(int viewWidth, int viewHeight)
+    {
+        _viewW = viewWidth;
+        _viewH = viewHeight;
+        ClampOnScreen();
+    }
+
+    private void SetFullMode(bool full)
+    {
+        _fullMode = full;
+        ClampOnScreen();
+        LayoutButtons();
+    }
+
+    private void ClampOnScreen()
+    {
+        var x = MathHelper.Clamp(Position.X, 0, Math.Max(0, _viewW - PanelW));
+        var y = MathHelper.Clamp(Position.Y, 0, Math.Max(0, _viewH - PanelH));
+        Position = new Vector2(x, y);
+    }
+
+    private void LayoutButtons()
+    {
+        // Every Bt* origin encodes its window-relative spot (CLayoutMan places them
+        // at (0,0) offset → the canvas origin), so drawing at the window top-left
+        // reproduces the authentic layout. The arrange button's two states
+        // (gather/sort) intentionally share the same origin.
+        if (_btCoin     != null) _btCoin.Position     = Position;
+        if (_btGather   != null) _btGather.Position   = Position;
+        if (_btSort     != null) _btSort.Position     = Position;
+        if (_btFull     != null) _btFull.Position     = Position;
+        if (_btSmall    != null) _btSmall.Position    = Position;
+        if (_btCashshop != null) _btCashshop.Position = Position;
+
+        if (_btFull  != null) _btFull.Enabled  = !_fullMode;
+        if (_btSmall != null) _btSmall.Enabled = _fullMode;
+
+        // Close X: top-right of the active background (small 172w / full 594w).
+        if (_btClose != null) _btClose.Position = Position + new Vector2(PanelW - 18, 6);
+    }
+
+    private IEnumerable<Button> VisibleButtons()
+    {
+        if (_btClose != null) yield return _btClose;
+        if (_btCoin != null) yield return _btCoin;
+        // Single arrange button (gather/sort are its two states).
+        var arrange = _showSort ? _btSort : _btGather;
+        if (arrange != null) yield return arrange;
+        if (_fullMode)
+        {
+            if (_btSmall    != null) yield return _btSmall;
+            if (_btCashshop != null) yield return _btCashshop;
+        }
+        else if (_btFull != null) yield return _btFull;
+    }
+
+    // ── Update ───────────────────────────────────────────────────────────────────
 
     public override void Update(GameTime gt)
     {
+        if (!IsVisible) return;
         LayoutButtons();
+
         var m  = Mouse.GetState();
         var mp = new Vector2(m.X, m.Y);
+        _mouseX = m.X; _mouseY = m.Y;
+
         if (_dragging)
         {
             if (m.LeftButton == ButtonState.Pressed) Position = mp - _dragOff;
-            else _dragging = false;
+            else { _dragging = false; ClampOnScreen(); }
         }
-        _hoverItem = HitTestItem((int)mp.X, (int)mp.Y);
+
+        // Mouse-wheel scroll (small mode only).
+        if (!_fullMode && WindowRect.Contains(m.X, m.Y))
+        {
+            var delta = m.ScrollWheelValue - _prevWheel;
+            if (delta != 0) ScrollBy(-Math.Sign(delta));
+        }
+        _prevWheel = m.ScrollWheelValue;
+
+        var down = m.LeftButton == ButtonState.Pressed;
+        foreach (var b in VisibleButtons()) b.Update(m.X, m.Y, down);
+
+        // Drag is click-to-grab / click-to-drop (resolved in HandleMouseButton), so nothing happens on
+        // mouse-up — the held item keeps following the cursor as a ghost until the next click.
+
+        (_hoverItem, _hoverPos) = HitTest(m.X, m.Y);
+    }
+
+    private void ScrollBy(int rows)
+    {
+        var max = MaxScroll();
+        _scrollRow[_activeTab] = Math.Clamp(_scrollRow[_activeTab] + rows, 0, max);
+    }
+
+    private int MaxScroll()
+    {
+        if (_fullMode || _tabs[_activeTab].Count == 0) return 0;
+        var highest = _tabs[_activeTab].Keys.Max();    // sorted keys → last is the max position
+        var totalRows = Math.Max(Rows, (highest + SmallCols - 1) / SmallCols);
+        return Math.Max(0, totalRows - Rows);
     }
 
     // ── Draw ───────────────────────────────────────────────────────────────────
@@ -185,102 +386,144 @@ public sealed class ItemInventory : GamePanel
     {
         if (!IsVisible) return;
 
-        var px = (int)Position.X;
-        var py = (int)Position.Y;
-
-        if (_background != null)
-            _background.Draw(sb, Position + new Vector2(PanelW / 2f, PanelH / 2f));
+        var bg = _fullMode ? _bgFull : _bgSmall;
+        if (bg[0] != null)
+        {
+            for (var i = 0; i < 3; i++) bg[i]?.Draw(sb, Position);
+        }
         else
         {
-            sb.Draw(white, new Rectangle(px, py, PanelW, PanelH), new Color(12, 14, 24, 240));
-            DrawBorder(sb, white, new Rectangle(px, py, PanelW, PanelH), new Color(60, 65, 100));
+            // Fallback chrome when the WZ background is unavailable.
+            var r = WindowRect;
+            sb.Draw(white, r, new Color(12, 14, 24, 240));
+            DrawBorder(sb, white, r, new Color(60, 65, 100));
         }
 
-        // Title strip
-        sb.Draw(white, new Rectangle(px, py, PanelW, 22), new Color(15, 18, 36));
-        _font?.Draw(sb, "Items - " + TabNames[_activeTab], new Vector2(px + 20, py + 5),
-            new Color(220, 200, 150));
-
-        // Tab strip
-        var tabW = PanelW / 5;
+        // Tabs: enabled sprite for the active one, disabled for the rest.
         for (var i = 0; i < 5; i++)
         {
-            var tx = px + i * tabW;
-            var tr = new Rectangle(tx, py + 22, tabW, 20);
-            var isActive = i == _activeTab;
-            sb.Draw(white, tr, isActive ? TabColors[i] with { A = 200 } : new Color(20, 22, 38));
-            DrawBorder(sb, white, tr, isActive ? TabColors[i] : new Color(40, 45, 65));
-            _font?.Draw(sb, TabNames[i][..1], new Vector2(tx + tabW / 2 - 3, py + 26),
-                isActive ? Color.White : new Color(130, 135, 160));
-            _tabBtns[i]?.Draw(sb);
-        }
-
-        // Item grid
-        var tabItems = _items.Where(it => it.Tab == _activeTab).OrderBy(it => it.Slot).ToList();
-        var scroll = _scrollOffset[_activeTab];
-
-        for (var r = 0; r < Rows; r++)
-        for (var c = 0; c < Cols; c++)
-        {
-            var idx = scroll * Cols + r * Cols + c;
-            var sr  = SlotRectAt(r, c);
-            DrawSlot(sb, white, sr, idx < tabItems.Count ? tabItems[idx] : null);
-        }
-
-        // Scroll indicator
-        var totalRows = (tabItems.Count + Cols - 1) / Cols;
-        if (scroll > 0 || totalRows > Rows)
-        {
-            var scrollBarX = px + PanelW - 10;
-            var barH = PanelH - GridY - 8;
-            sb.Draw(white, new Rectangle(scrollBarX, py + GridY, 6, barH), new Color(20, 22, 38));
-            var thumbH = Math.Max(20, barH * Rows / Math.Max(totalRows, 1));
-            var thumbY = totalRows > 0 ? (int)(barH * scroll / totalRows) : 0;
-            sb.Draw(white, new Rectangle(scrollBarX, py + GridY + thumbY, 6, thumbH), new Color(70, 75, 110));
-        }
-
-        // Hover tooltip
-        if (_hoverItem != null && _font != null)
-        {
-            var m = Mouse.GetState();
-            DrawItemTooltip(sb, white, _hoverItem, m.X, m.Y);
-        }
-
-        foreach (var b in _allButtons) b.Draw(sb);
-    }
-
-    private void DrawSlot(SpriteBatch sb, Texture2D white, Rectangle r, InvItem? item)
-    {
-        if (_slotBg != null)
-            _slotBg.Draw(sb, new Vector2(r.X + SlotW / 2f, r.Y + SlotH / 2f));
-        else
-        {
-            sb.Draw(white, r, item != null ? new Color(24, 32, 22) : new Color(16, 18, 28));
-            DrawBorder(sb, white, r, item != null ? new Color(55, 85, 55) : new Color(40, 44, 68));
-        }
-
-        if (item != null)
-        {
-            // Icon placeholder: first 2 letters
-            _font?.Draw(sb, item.Name.Length >= 2 ? item.Name[..2] : item.Name,
-                new Vector2(r.X + 6, r.Y + 9), new Color(200, 220, 200));
-
-            // Quantity badge (if > 1)
-            if (item.Quantity > 1 && _font != null)
+            var spr = i == _activeTab ? _tabEnabled[i] : _tabDisabled[i];
+            if (spr != null) spr.Draw(sb, Position);
+            else
             {
-                var qty = item.Quantity > 9999 ? "999+" : item.Quantity.ToString();
-                var sz  = _font.Measure(qty);
-                var tx  = r.X + r.Width - (int)sz.X - 1;
-                _font.Draw(sb, qty, new Vector2(tx, r.Y + r.Height - _font.LineHeight),
-                    new Color(220, 220, 120));
+                var tr = TabRect(i);
+                sb.Draw(white, tr, i == _activeTab ? new Color(70, 90, 140) : new Color(28, 30, 46));
+                _font?.Draw(sb, TabNames[i][..1], new Vector2(tr.X + 11, tr.Y + 5),
+                    i == _activeTab ? Color.White : new Color(140, 145, 170));
             }
         }
+
+        // Hover highlight (drawn under the icon). activeIcon origin (2,2) inset,
+        // so drawing at the cell top-left frames the 32-box with a 2px margin.
+        if (_hoverPos > 0 && CellForPosition(_hoverPos, out var hcell))
+            _activeIcon?.Draw(sb, hcell);
+
+        // Occupied slots.
+        foreach (var (pos, it) in _tabs[_activeTab])
+        {
+            if (!CellForPosition(pos, out var cell)) continue;
+            // A picked-up item stays drawn in its home slot — only a ghost copy follows the cursor.
+            DrawItemIcon(sb, white, it, cell);
+            if (it.Grade is > 0 and < 6 && _quality[it.Grade] != null)
+                DrawAt(sb, _quality[it.Grade], cell + new Vector2(1, 1));
+            // Cash items show a gold coin in the corner of the slot (matches the tooltip indicator).
+            if (_icons?.LoadAttr(it.Id) is { Cash: true })
+                ItemTooltip.DrawCashCoin(sb, white, (int)cell.X + 1, (int)cell.Y + IconBox - 11);
+            if (it.Quantity > 1) DrawQuantity(sb, it.Quantity, cell);
+        }
+
+        // Small-mode scrollbar thumb.
+        if (!_fullMode)
+        {
+            var max = MaxScroll();
+            if (max > 0)
+            {
+                var barX = (int)Position.X + ScrollX;
+                var barY = (int)(Position.Y + SlotBase.Y);
+                var barH = Rows * CellH;
+                sb.Draw(white, new Rectangle(barX, barY, 5, barH), new Color(18, 20, 32, 180));
+                var totalRows = max + Rows;
+                var thumbH = Math.Max(16, barH * Rows / totalRows);
+                var thumbY = barY + (barH - thumbH) * _scrollRow[_activeTab] / max;
+                sb.Draw(white, new Rectangle(barX, thumbY, 5, thumbH), new Color(90, 95, 130));
+            }
+        }
+
+        foreach (var b in VisibleButtons()) b.Draw(sb);
+
+        // Meso: right-aligned ending at x=126, y=268 (CUIItem::Draw → DrawTextA),
+        // small black font.
+        if (_font != null)
+        {
+            var meso = _meso.ToString("N0", System.Globalization.CultureInfo.InvariantCulture);
+            var w = _font.Measure(meso).X;
+            _font.Draw(sb, meso, new Vector2(Position.X + MesoRight - w, Position.Y + MesoY),
+                new Color(40, 40, 40));
+        }
+
+        // Ghost: a translucent copy of the held item's icon follows the cursor (sitting just below the
+        // closed-hand "grab" cursor). The real item stays put in its slot until the drop click lands.
+        if (_dragActive && _dragItem != null)
+        {
+            var icon = ResolveIcon(_dragItem);
+            if (icon != null)
+                icon.Draw(sb, new Vector2(_mouseX - icon.Width / 2f, _mouseY - icon.Height / 2f) + icon.Origin,
+                    Microsoft.Xna.Framework.Graphics.SpriteEffects.None, new Color(255, 255, 255, 130));
+            else
+                sb.Draw(white, new Rectangle(_mouseX - 14, _mouseY - 14, 28, 28), new Color(80, 90, 120, 120));
+        }
+        else if (_hoverItem != null)
+        {
+            if (_tooltip != null)
+                _tooltip.Draw(sb, white, _hoverItem.Id, _hoverItem.Name, _hoverItem.Grade,
+                    _hoverItem.Quantity, _mouseX, _mouseY, _viewW, _viewH);
+            else if (_font != null)
+                DrawTooltip(sb, white, _hoverItem, _mouseX, _mouseY);
+        }
     }
 
-    private void DrawItemTooltip(SpriteBatch sb, Texture2D white, InvItem item, int mx, int my)
+    private void DrawItemIcon(SpriteBatch sb, Texture2D white, InvItem it, Vector2 cell)
+    {
+        var icon = ResolveIcon(it);
+        if (icon != null)
+        {
+            // Centre the icon in the 32×32 slot box, honouring its (bottom-anchored) origin.
+            var pos = cell + new Vector2(
+                (IconBox - icon.Width) / 2f + icon.Origin.X,
+                (IconBox - icon.Height) / 2f + icon.Origin.Y);
+            icon.Draw(sb, pos);
+        }
+        else
+        {
+            // Placeholder when the icon can't be resolved.
+            var r = new Rectangle((int)cell.X + 1, (int)cell.Y + 1, IconBox - 2, IconBox - 2);
+            sb.Draw(white, r, new Color(40, 46, 66, 220));
+            _font?.Draw(sb, it.Name.Length >= 2 ? it.Name[..2] : it.Name,
+                new Vector2(r.X + 4, r.Y + 8), new Color(200, 210, 225));
+        }
+    }
+
+    private WzSprite? ResolveIcon(InvItem it)
+    {
+        if (it.IconResolved) return it.Icon;
+        it.Icon = _icons?.LoadIcon(it.Id);
+        it.IconResolved = true;
+        return it.Icon;
+    }
+
+    private void DrawQuantity(SpriteBatch sb, int qty, Vector2 cell)
+    {
+        if (_font == null) return;
+        var s  = qty > 99999 ? "99999+" : qty.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        var sz = _font.Measure(s);
+        _font.Draw(sb, s, new Vector2(cell.X + IconBox - sz.X - 1, cell.Y + IconBox - _font.LineHeight),
+            new Color(245, 240, 200));
+    }
+
+    private void DrawTooltip(SpriteBatch sb, Texture2D white, InvItem item, int mx, int my)
     {
         var lines = new[] { item.Name, $"ID: {item.Id}", $"Qty: {item.Quantity}" };
-        var maxW  = lines.Max(l => (int)(_font!.Measure(l).X));
+        var maxW  = lines.Max(l => (int)_font!.Measure(l).X);
         var h     = lines.Length * (_font!.LineHeight + 2) + 8;
         var tr    = new Rectangle(mx + 14, my - h - 4, maxW + 12, h);
         sb.Draw(white, tr, new Color(0, 0, 0, 215));
@@ -290,110 +533,185 @@ public sealed class ItemInventory : GamePanel
                 i == 0 ? Color.White : new Color(180, 185, 210));
     }
 
-    // ── Input ──────────────────────────────────────────────────────────────────
+    private static void DrawAt(SpriteBatch sb, WzSprite? s, Vector2 topLeft)
+    {
+        if (s != null) s.Draw(sb, topLeft + s.Origin);
+    }
 
-    /// <summary>Raised on a double-click of an occupied slot: (tab, slot, itemId).
-    /// GameStage decides whether to use (consume tab) or equip (equip tab).</summary>
-    public Action<int, int, int>? OnItemActivate { get; set; }
+    // ── Input ────────────────────────────────────────────────────────────────────
 
-    private double _lastClickTime;
-    private InvItem? _lastClickItem;
+    private double _pickupTime;
+
+    /// <summary>True while an item is picked up onto the cursor (ghost-drag in progress). GameStage
+    /// reads this to switch the cursor to the closed-hand "grab" sprite. Gated on visibility so hiding
+    /// the window mid-drag can't leave the cursor stuck as a grab hand (the item never left its slot).</summary>
+    public bool IsDragging => _dragActive && IsVisible;
+
+    /// <summary>True while the cursor is hovering an occupied slot and nothing is grabbed yet —
+    /// GameStage uses this to flip the cursor to the open-hand variant 5 ("ready to grab"). Gated
+    /// on visibility so a hover state can't outlive the window.</summary>
+    public bool HoverOverItem => IsVisible && !_dragActive && _hoverItem is not null;
+
+    /// <summary>True when the point is inside this (visible) window — used to detect an equip dropped
+    /// here to unequip it.</summary>
+    public bool ContainsPoint(int x, int y) => IsVisible && WindowRect.Contains(x, y);
 
     public override bool HandleMouseButton(int x, int y, bool down)
     {
         if (!IsVisible) return false;
-        foreach (var b in _allButtons)
+
+        foreach (var b in VisibleButtons())
             if (b.HandleMouseButton(x, y, down)) return true;
 
         if (down)
         {
-            var hit = HitTestItem(x, y);
+            // Close hotspot (top-right; the X is baked into the background art).
+            if (CloseRect.Contains(x, y)) { IsVisible = false; CancelDrag(); return true; }
+
+            // If an item is already held on the cursor, this click resolves it (drop / move / activate).
+            if (_dragActive)
+            {
+                // Switching tabs while holding is allowed, so the item can be dropped into another tab.
+                for (var i = 0; i < 5; i++)
+                    if (TabRect(i).Contains(x, y)) { _activeTab = i; return true; }
+
+                var (_, overPos) = HitTest(x, y);
+                var now = Environment.TickCount64 / 1000.0;
+                var sameSlot = overPos == _dragFromSlot && _activeTab == _dragFromTab;
+                if (sameSlot && now - _pickupTime < 0.4)
+                    // A quick second click back on the source slot reads as a double-click → equip/use.
+                    OnItemActivate?.Invoke(_dragItem!.Tab, _dragItem.Slot, _dragItem.Id);
+                else if (overPos > 0 && !sameSlot)
+                    OnMoveItem?.Invoke(_dragFromTab, _dragFromSlot, overPos);
+                // Same slot (slow click), an empty cell, or outside → just put it back.
+                CancelDrag();
+                return true;
+            }
+
+            // Tab switch.
+            for (var i = 0; i < 5; i++)
+                if (TabRect(i).Contains(x, y)) { _activeTab = i; return true; }
+
+            // Slot click: pick the item up onto the cursor (a ghost copy follows it; the real item stays
+            // in its slot). It is dropped/moved on the next click; a fast click back on it equips/uses it.
+            var (hit, hitPos) = HitTest(x, y);
             if (hit != null)
             {
-                var now = Environment.TickCount64 / 1000.0;
-                if (ReferenceEquals(hit, _lastClickItem) && now - _lastClickTime < 0.4)
-                {
-                    OnItemActivate?.Invoke(hit.Tab, hit.Slot, hit.Id);
-                    _lastClickItem = null;
-                }
-                else
-                {
-                    _lastClickItem = hit;
-                    _lastClickTime = now;
-                }
+                _dragActive   = true;
+                _dragItem     = hit;
+                _dragFromSlot = hitPos;
+                _dragFromTab  = _activeTab;
+                _pickupTime   = Environment.TickCount64 / 1000.0;
+                return true;
+            }
+
+            // Title strip → drag.
+            if (TitleRect.Contains(x, y))
+            {
+                _dragging = true;
+                _dragOff = new Vector2(x - Position.X, y - Position.Y);
                 return true;
             }
         }
 
-        var titleBar = new Rectangle((int)Position.X, (int)Position.Y, PanelW, 22);
-        if (down && titleBar.Contains(x, y))
-        {
-            _dragging = true;
-            _dragOff = new Vector2(x - Position.X, y - Position.Y);
-            return true;
-        }
-        return new Rectangle((int)Position.X, (int)Position.Y, PanelW, PanelH).Contains(x, y);
+        return WindowRect.Contains(x, y);
+    }
+
+    private void CancelDrag()
+    {
+        _dragActive   = false;
+        _dragItem     = null;
+        _dragFromSlot = -1;
     }
 
     public override bool OnKeyPress(Keys key)
     {
         if (!IsVisible) return false;
-        if (key == Keys.Escape) { IsVisible = false; return true; }
-        var tabItems = _items.Where(it => it.Tab == _activeTab).OrderBy(it => it.Slot).ToList();
-        var maxScroll = Math.Max(0, (tabItems.Count + Cols - 1) / Cols - Rows);
-        if (key == Keys.PageDown) { _scrollOffset[_activeTab] = Math.Min(_scrollOffset[_activeTab] + 1, maxScroll); return true; }
-        if (key == Keys.PageUp)   { _scrollOffset[_activeTab] = Math.Max(0, _scrollOffset[_activeTab] - 1); return true; }
-        return false;
+        switch (key)
+        {
+            case Keys.Escape:   IsVisible = false; return true;
+            case Keys.PageDown: ScrollBy(1);  return true;
+            case Keys.PageUp:   ScrollBy(-1); return true;
+            case Keys.Tab:      _activeTab = (_activeTab + 1) % 5; return true;
+            default: return false;
+        }
+    }
+
+    // ── Slot ↔ position mapping ───────────────────────────────────────────────────
+
+    /// <summary>Top-left of the cell for a 1-based inventory position, if visible.</summary>
+    private bool CellForPosition(int pos, out Vector2 cell)
+    {
+        cell = default;
+        if (pos < 1) return false;
+        var abs = pos - 1;
+        int col, row;
+        if (_fullMode)
+        {
+            if (abs >= FullCols * Rows) return false;     // beyond the 96-slot page set
+            var page = abs / PageSlots;
+            var idx  = abs % PageSlots;
+            col = page * SmallCols + idx % SmallCols;
+            row = idx / SmallCols;
+        }
+        else
+        {
+            var r = abs / SmallCols;
+            if (r < _scrollRow[_activeTab] || r >= _scrollRow[_activeTab] + Rows) return false;
+            col = abs % SmallCols;
+            row = r - _scrollRow[_activeTab];
+        }
+        cell = new Vector2(Position.X + SlotBase.X + col * CellW, Position.Y + SlotBase.Y + row * CellH);
+        return true;
+    }
+
+    /// <summary>The item (and its position) under a screen point, or (null,-1).</summary>
+    private (InvItem? item, int pos) HitTest(int x, int y)
+    {
+        var cols = Cols;
+        for (var vr = 0; vr < Rows; vr++)
+        for (var vc = 0; vc < cols; vc++)
+        {
+            // Hit area is the 32×32 slot box (gaps between cells register as empty,
+            // matching CUIItem::GetSlotPositionFromPoint).
+            var cx = (int)(Position.X + SlotBase.X + vc * CellW);
+            var cy = (int)(Position.Y + SlotBase.Y + vr * CellH);
+            if (x < cx || x >= cx + IconBox || y < cy || y >= cy + IconBox) continue;
+
+            int abs;
+            if (_fullMode)
+            {
+                var page = vc / SmallCols;
+                var cInPage = vc % SmallCols;
+                abs = page * PageSlots + vr * SmallCols + cInPage;
+            }
+            else
+            {
+                abs = (_scrollRow[_activeTab] + vr) * SmallCols + vc;
+            }
+            var pos = abs + 1;
+            return (ItemAt(_activeTab, pos), pos);
+        }
+        return (null, -1);
     }
 
     // ── Helpers ────────────────────────────────────────────────────────────────
 
-    private Rectangle SlotRectAt(int row, int col) =>
-        new Rectangle(
-            (int)Position.X + GridX + col * (SlotW + GapX),
-            (int)Position.Y + GridY + row * (SlotH + GapY),
-            SlotW, SlotH);
+    private Rectangle WindowRect => new((int)Position.X, (int)Position.Y, PanelW, PanelH);
+    private Rectangle TitleRect  => new((int)Position.X, (int)Position.Y, PanelW, 22);
+    private Rectangle CloseRect  => new((int)Position.X + PanelW - 20, (int)Position.Y + 5, 14, 14);
+    private Rectangle TabRect(int i) =>
+        new((int)Position.X + TabX0 + i * TabStride, (int)Position.Y + TabY, TabW, TabH);
 
-    private InvItem? HitTestItem(int x, int y)
-    {
-        var tabItems = _items.Where(it => it.Tab == _activeTab).OrderBy(it => it.Slot).ToList();
-        var scroll   = _scrollOffset[_activeTab];
-        for (var r = 0; r < Rows; r++)
-        for (var c = 0; c < Cols; c++)
-        {
-            var idx = scroll * Cols + r * Cols + c;
-            if (idx >= tabItems.Count) return null;
-            if (SlotRectAt(r, c).Contains(x, y)) return tabItems[idx];
-        }
-        return null;
-    }
+    private WzSprite? LoadCanvas(WzProperty? root, string name) =>
+        root?.Get(name) is WzCanvas c ? _loader.Load(c) : null;
 
-    private void LayoutButtons()
+    private Button? MakeButton(WzProperty? item, string name, Action? onClick = null)
     {
-        if (_btClose != null) _btClose.Position = Position + new Vector2(PanelW - 18, 4);
-        var tabW = PanelW / 5;
-        for (var i = 0; i < 5; i++)
-            if (_tabBtns[i] != null)
-                _tabBtns[i]!.Position = Position + new Vector2(i * tabW + tabW / 2f, 30);
-    }
-
-    private void SeedPlaceholder()
-    {
-        // Tab 0: Equip
-        _items.Add(new InvItem { Id = 1302000, Name = "Sword",        Quantity = 1, Tab = 0 });
-        _items.Add(new InvItem { Id = 1040002, Name = "Cloth Shirt",  Quantity = 1, Tab = 0 });
-        _items.Add(new InvItem { Id = 1060002, Name = "Cloth Shorts", Quantity = 1, Tab = 0 });
-        _items.Add(new InvItem { Id = 1072001, Name = "Leather Shoes",Quantity = 1, Tab = 0 });
-        // Tab 1: Use
-        _items.Add(new InvItem { Id = 2000000, Name = "Red Potion",   Quantity = 100, Tab = 1 });
-        _items.Add(new InvItem { Id = 2000001, Name = "Orange Potion",Quantity = 50,  Tab = 1 });
-        _items.Add(new InvItem { Id = 2000002, Name = "White Potion", Quantity = 20,  Tab = 1 });
-        _items.Add(new InvItem { Id = 2001000, Name = "Mana Elixir",  Quantity = 30,  Tab = 1 });
-        _items.Add(new InvItem { Id = 2000006, Name = "Power Elixir", Quantity = 5,   Tab = 1 });
-        // Tab 3: Etc
-        _items.Add(new InvItem { Id = 4000000, Name = "Blue Snail Shell", Quantity = 12, Tab = 3 });
-        _items.Add(new InvItem { Id = 4000001, Name = "Snail Shell",     Quantity = 8,  Tab = 3 });
-        _items.Add(new InvItem { Id = 4000002, Name = "Orange Mushroom Cap", Quantity = 3, Tab = 3 });
+        if (item?.Get(name) is not WzProperty root) return null;
+        var b = new Button(_loader, root);
+        if (onClick != null) b.OnClick = onClick;
+        return b;
     }
 
     private static void DrawBorder(SpriteBatch sb, Texture2D white, Rectangle r, Color c)

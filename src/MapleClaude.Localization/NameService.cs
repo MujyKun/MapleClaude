@@ -27,10 +27,12 @@ public sealed class NameService
     private readonly ILogger? _logger;
 
     private Dictionary<int, string>? _items;
+    private Dictionary<int, string>? _itemDescs;
     private Dictionary<int, string>? _quests;
     private Dictionary<int, string>? _maps;
     private Dictionary<int, string>? _mobs;
     private Dictionary<int, string>? _npcs;
+    private Dictionary<int, Dictionary<string, string>>? _npcStrings;
     private Dictionary<int, string>? _skills;
 
     public NameService(Func<WzPackage?> stringWzProvider, ILogger? logger = null,
@@ -42,18 +44,26 @@ public sealed class NameService
     }
 
     public string? ItemName(int id)  => Items().GetValueOrDefault(id);
+    /// <summary>The item's flavour-text description (String.wz <c>…/&lt;id&gt;/desc</c>), or null.</summary>
+    public string? ItemDesc(int id)  => ItemDescs().GetValueOrDefault(id);
     public string? SkillName(int id) => Skills().GetValueOrDefault(id);
     public string? MapName(int id)   => Maps().GetValueOrDefault(id);
     public string? MobName(int id)   => Mobs().GetValueOrDefault(id);
     public string? NpcName(int id)   => Npcs().GetValueOrDefault(id);
     public string? QuestName(int id) => Quests().GetValueOrDefault(id);
 
+    /// <summary>A single String.wz/Npc.img/&lt;id&gt;/&lt;key&gt; string (e.g. an ambient-speak line
+    /// keyed "n0"/"s0"), or null. Used to resolve <see cref="MapleClaude.Wz"/> NPC <c>info/speak</c> keys.</summary>
+    public string? NpcText(int id, string key) => NpcStrings().GetValueOrDefault(id)?.GetValueOrDefault(key);
+
     // ── Lazy category loaders ───────────────────────────────────────────────────
 
-    private Dictionary<int, string> Items()  => _items  ??= LoadItems();
+    private Dictionary<int, string> Items()     => _items     ??= LoadItemStrings("name");
+    private Dictionary<int, string> ItemDescs() => _itemDescs ??= LoadItemStrings("desc");
     private Dictionary<int, string> Maps()   => _maps   ??= LoadMaps();
     private Dictionary<int, string> Mobs()   => _mobs   ??= LoadFlatImage("Mob.img");
     private Dictionary<int, string> Npcs()   => _npcs   ??= LoadNpcs();
+    private Dictionary<int, Dictionary<string, string>> NpcStrings() => _npcStrings ??= LoadNpcStrings();
     private Dictionary<int, string> Skills() => _skills ??= LoadSkills();
     private Dictionary<int, string> Quests() => _quests ??= LoadQuests();
 
@@ -74,33 +84,32 @@ public sealed class NameService
         return dict;
     }
 
-    private Dictionary<int, string> LoadItems()
+    // Loads either the item names (fieldKey "name") or descriptions (fieldKey "desc"). Same WZ layout:
+    // Eqp.img/Eqp/<Type>/<id>/<field>, Etc.img/Etc/<id>/<field>, and flat Consume/Ins/Cash/Pet images.
+    private Dictionary<int, string> LoadItemStrings(string fieldKey)
     {
         var dict = new Dictionary<int, string>();
         var wz = _stringWz();
         if (wz is null) return dict;
         try
         {
-            // Eqp.img/Eqp/<Type>/<id>/name
             if (wz.GetItem("Eqp.img/Eqp") is WzProperty eqp)
             {
                 foreach (var type in EquipTypes)
                 {
-                    if (eqp.Get(type) is WzProperty list) AddNames(list, dict);
+                    if (eqp.Get(type) is WzProperty list) AddNames(list, dict, fieldKey);
                 }
             }
-            // Etc.img/Etc/<id>/name
-            if (wz.GetItem("Etc.img/Etc") is WzProperty etc) AddNames(etc, dict);
-            // Flat <img>/<id>/name images
+            if (wz.GetItem("Etc.img/Etc") is WzProperty etc) AddNames(etc, dict, fieldKey);
             foreach (var img in new[] { "Consume.img", "Ins.img", "Cash.img", "Pet.img" })
             {
-                if (wz.GetItem(img) is WzImage image) AddNames(image.Root, dict);
+                if (wz.GetItem(img) is WzImage image) AddNames(image.Root, dict, fieldKey);
             }
-            _logger?.LogInformation("NameService: loaded {Count} item names", dict.Count);
+            _logger?.LogInformation("NameService: loaded {Count} item {Field} strings", dict.Count, fieldKey);
         }
         catch (Exception ex)
         {
-            _logger?.LogWarning(ex, "NameService: failed loading item names");
+            _logger?.LogWarning(ex, "NameService: failed loading item {Field} strings", fieldKey);
         }
         return dict;
     }
@@ -150,6 +159,31 @@ public sealed class NameService
         catch (Exception ex)
         {
             _logger?.LogWarning(ex, "NameService: failed loading npc names");
+        }
+        return dict;
+    }
+
+    // String.wz/Npc.img/<id>/* — the full per-NPC string sub-table (name, func, d0…, n0…/s0…),
+    // cached so ambient-speak keys resolve without re-walking the WZ each tick.
+    private Dictionary<int, Dictionary<string, string>> LoadNpcStrings()
+    {
+        var dict = new Dictionary<int, Dictionary<string, string>>();
+        var wz = _stringWz();
+        if (wz?.GetItem("Npc.img") is not WzImage image) return dict;
+        try
+        {
+            foreach (var (key, val) in image.Root.Items)
+            {
+                if (!int.TryParse(key, out var id) || val is not WzProperty p) continue;
+                var sub = new Dictionary<string, string>();
+                foreach (var (k, v) in p.Items)
+                    if (v is string s) sub[k] = s;
+                if (sub.Count > 0) dict[id] = sub;
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogWarning(ex, "NameService: failed loading npc strings");
         }
         return dict;
     }

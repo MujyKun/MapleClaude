@@ -20,9 +20,11 @@ public sealed class WzAudioPlayer : IDisposable
     private readonly Dictionary<WzSound, (Song Song, string Path)> _cache = new();
     private readonly Dictionary<WzSound, SoundEffect?> _effects = new();
     private Song? _current;
+    private WzSound? _currentSound;
     private bool _disposed;
     private float _bgmVolume = 0.6f;
     private float _sfxVolume = 1.0f;
+    private bool _muted;
 
     public WzAudioPlayer(ILogger logger)
     {
@@ -31,16 +33,41 @@ public sealed class WzAudioPlayer : IDisposable
         Directory.CreateDirectory(_tempDir);
     }
 
-    /// <summary>BGM volume, 0.0–1.0. Applied to the live track immediately.</summary>
+    /// <summary>BGM volume, 0.0–1.0. Applied to the live track immediately (unless muted).</summary>
     public float Volume
     {
         get => _bgmVolume;
         set
         {
             _bgmVolume = Math.Clamp(value, 0f, 1f);
-            try { MediaPlayer.Volume = _bgmVolume; }
-            catch { /* no audio device / headless */ }
+            ApplyBgmVolume();
         }
+    }
+
+    /// <summary>When true, the BGM is silenced without losing the configured
+    /// <see cref="Volume"/>. The player is a singleton, so this state persists across
+    /// stage transitions (login → world → char select share one track).</summary>
+    public bool Muted
+    {
+        get => _muted;
+        set
+        {
+            _muted = value;
+            ApplyBgmVolume();
+        }
+    }
+
+    /// <summary>Flips <see cref="Muted"/>. Returns the new muted state.</summary>
+    public bool ToggleMute()
+    {
+        Muted = !_muted;
+        return _muted;
+    }
+
+    private void ApplyBgmVolume()
+    {
+        try { MediaPlayer.Volume = _muted ? 0f : _bgmVolume; }
+        catch { /* no audio device / headless */ }
     }
 
     /// <summary>SFX volume, 0.0–1.0. Applied per <see cref="PlayEffect"/> call.</summary>
@@ -51,14 +78,30 @@ public sealed class WzAudioPlayer : IDisposable
     }
 
     /// <summary>
-    /// Starts playing the given sound on loop (BGM mode). Stops any currently
-    /// playing track. Returns <c>false</c> if the sound couldn't be prepared.
+    /// Starts playing the given sound on loop (BGM mode). If the same sound is
+    /// already looping, this is a no-op so the track plays seamlessly across
+    /// scene transitions that share a BGM (e.g. login → world → char select on
+    /// the one login map). Switching to a different sound replaces the track.
+    /// Returns <c>false</c> if the sound couldn't be prepared.
     /// </summary>
     public bool PlayLoop(WzSound? sound)
     {
         if (_disposed || sound is null)
         {
             return false;
+        }
+
+        // Idempotent: don't restart a track that's already the current loop.
+        if (ReferenceEquals(sound, _currentSound) && _current != null)
+        {
+            try
+            {
+                if (MediaPlayer.State is MediaState.Playing or MediaState.Paused)
+                {
+                    return true;
+                }
+            }
+            catch { /* no audio device / headless */ }
         }
 
         try
@@ -72,8 +115,9 @@ public sealed class WzAudioPlayer : IDisposable
                 _cache[sound] = entry;
             }
             _current = entry.Song;
+            _currentSound = sound;
             MediaPlayer.IsRepeating = true;
-            MediaPlayer.Volume = _bgmVolume;
+            MediaPlayer.Volume = _muted ? 0f : _bgmVolume;
             MediaPlayer.Play(_current);
             _logger.LogInformation("BGM playing: {Duration}ms", sound.DurationMs);
             return true;
@@ -155,6 +199,7 @@ public sealed class WzAudioPlayer : IDisposable
                 // Ignore: MediaPlayer can throw when running headless or with no audio device.
             }
             _current = null;
+            _currentSound = null;
         }
     }
 

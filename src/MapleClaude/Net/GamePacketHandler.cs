@@ -30,10 +30,44 @@ public sealed class GamePacketHandler
     private readonly ILogger<GamePacketHandler> _logger;
     private readonly Dictionary<OutHeader, IPacketHandler?> _priorHandlers = new();
 
-    /// <summary>Fired after a <c>StatChanged</c> packet is fully decoded; carries
-    /// the accumulated stat snapshot (only mask-set fields are updated, others
-    /// preserve prior values).</summary>
-    public Action<CharStats>? OnStatChanged;
+    /// <summary>Fired after a <c>StatChanged</c> packet is fully decoded. Carries
+    /// the persistent, accumulated stat snapshot (only mask-set fields are updated;
+    /// all others preserve their prior values) plus the raw <c>dwCharStat</c> mask
+    /// so consumers can tell which fields actually changed this packet (e.g. to
+    /// avoid re-firing a level-up popup on an unrelated HP update).</summary>
+    public Action<CharStats, int>? OnStatChanged;
+
+    /// <summary>Long-lived snapshot merged across successive partial
+    /// <c>StatChanged</c> bursts. Never replaced, only mutated in place.</summary>
+    private readonly CharStats _snapshot = new();
+
+    /// <summary>Seed the persistent snapshot from the authoritative full
+    /// <c>CharacterStat</c> block carried by the migrate <c>SetField</c>.
+    /// Without this seed, the first partial <c>StatChanged</c> burst (e.g. an
+    /// HP-only change from damage / regen / a money tick) would replace the
+    /// in-game <c>_charStats</c> with a snapshot whose unmasked fields are
+    /// still zero, zeroing the visible Level / MaxHP / MaxMP on the HUD and
+    /// Stat window. Call from <c>GameStage.OnSetField</c> right after building
+    /// the seeded <c>_charStats</c>.</summary>
+    public void SeedSnapshot(CharStats seed)
+    {
+        _snapshot.Name  = seed.Name;
+        _snapshot.Level = seed.Level;
+        _snapshot.JobId = seed.JobId;
+        _snapshot.Str   = seed.Str;
+        _snapshot.Dex   = seed.Dex;
+        _snapshot.Int   = seed.Int;
+        _snapshot.Luk   = seed.Luk;
+        _snapshot.Hp    = seed.Hp;
+        _snapshot.MaxHp = seed.MaxHp;
+        _snapshot.Mp    = seed.Mp;
+        _snapshot.MaxMp = seed.MaxMp;
+        _snapshot.Exp   = seed.Exp;
+        _snapshot.AP    = seed.AP;
+        _snapshot.SP    = seed.SP;
+        _snapshot.Fame  = seed.Fame;
+        _snapshot.Guild = seed.Guild;
+    }
 
     /// <summary>Fired after a <c>FuncKeyMappedInit</c> packet is fully decoded;
     /// <see cref="FuncKeyEntries"/> holds the 89-entry array the receiver can feed
@@ -157,12 +191,9 @@ public sealed class GamePacketHandler
         p.ReadByte();             // bExclRequestSent
         var mask = p.ReadInt();   // dwCharStat (Stat.from(...))
 
-        var stats = new CharStats
-        {
-            // Preserve prior known fields by reading any existing snapshot --
-            // but since GamePacketHandler holds none, this is the merge surface.
-            Name = string.Empty,
-        };
+        // Merge masked fields into the persistent snapshot; unmasked fields keep
+        // their prior values (a burst may carry e.g. HP only).
+        var stats = _snapshot;
 
         if ((mask & 0x1)     != 0) p.ReadByte();                // SKIN
         if ((mask & 0x2)     != 0) p.ReadInt();                 // FACE
@@ -181,7 +212,7 @@ public sealed class GamePacketHandler
         if ((mask & 0x4000)  != 0) stats.AP    = p.ReadShort();
         if ((mask & 0x8000)  != 0) stats.SP    = p.ReadShort();
         if ((mask & 0x10000) != 0) stats.Exp   = p.ReadInt();
-        if ((mask & 0x20000) != 0) p.ReadShort();               // POP
+        if ((mask & 0x20000) != 0) stats.Fame  = p.ReadShort();  // POP
         if ((mask & 0x40000) != 0) p.ReadInt();                 // MONEY
         if ((mask & 0x80000) != 0) p.ReadLong();                // PETSN2
         if ((mask & 0x100000)!= 0) p.ReadLong();                // PETSN3
@@ -193,7 +224,7 @@ public sealed class GamePacketHandler
         try { p.ReadByte(); } catch { /* SecondaryStatChangedPoint flag */ }
         try { p.ReadByte(); } catch { /* BattleRecoveryInfo flag */ }
 
-        OnStatChanged?.Invoke(stats);
+        OnStatChanged?.Invoke(stats, mask);
     }
 
     // FieldPacket.funcKeyMappedInit (OutHeader.FuncKeyMappedInit = 398):
